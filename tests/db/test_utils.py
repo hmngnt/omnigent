@@ -306,20 +306,42 @@ def test_translate_missing_driver_passes_through_unrelated_errors() -> None:
     assert _translate_missing_driver_error("not a uri at all", garbage) is garbage
 
 
-def test_paas_postgres_scheme_gets_conversion_guidance() -> None:
+def test_paas_postgres_scheme_is_normalized_by_the_engine_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """
-    ``postgres://`` is not a SQLAlchemy dialect at all — it fails with an
+    ``postgres://`` is not a SQLAlchemy dialect at all, but it never reaches
+    SQLAlchemy: the central engine factory normalizes it to
+    ``postgresql+psycopg://`` (spawn-path parity), so a direct
+    ``--database-uri`` in the PaaS form simply works.
+    """
+    from omnigent.db import utils
+
+    captured: dict[str, Any] = {}
+
+    def capture(uri: str, **kwargs: Any) -> MagicMock:
+        captured["uri"] = uri
+        return MagicMock()
+
+    monkeypatch.setattr(utils, "create_engine", capture)
+    utils._create_engine("postgres://user:secret@host:5432/db")
+
+    assert captured["uri"] == "postgresql+psycopg://user:secret@host:5432/db"
+
+
+def test_unnormalizable_postgres_scheme_gets_conversion_guidance() -> None:
+    """
+    A Postgres-family scheme the factory cannot normalize still fails with an
     opaque ``NoSuchModuleError`` *before* any driver import. The engine
     factory must append conversion guidance pointing at
-    ``postgresql+psycopg://`` (the spawn path normalizes this away, but a
-    direct ``--database-uri`` can still get here). Credentials must not leak.
+    ``postgresql+psycopg://``. Credentials must not leak.
     """
     from sqlalchemy.exc import NoSuchModuleError
 
     from omnigent.db import utils
 
     with pytest.raises(NoSuchModuleError) as excinfo:
-        utils._create_engine("postgres://user:secret@host:5432/db")
+        utils._create_engine("postgres+asyncpg://user:secret@host:5432/db")
 
     message = str(excinfo.value)
     assert "postgresql+psycopg://" in message
