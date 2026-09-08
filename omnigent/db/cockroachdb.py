@@ -22,8 +22,13 @@ from omnigent.db.query_context import query_name_scope
 _logger = logging.getLogger(__name__)
 
 # The first revision that can be reached on CockroachDB without executing the
-# PostgreSQL-oriented historical migration chain.
-CRDB_BASELINE_REVISION = "ga1b2c3d4e5f"
+# PostgreSQL-oriented historical migration chain. This must be the Alembic
+# head at the time CockroachDB support lands: bootstrap builds the schema
+# from current ORM metadata and stamps head, so no CockroachDB database can
+# exist at an earlier revision, and migrations between the old baseline and
+# this head (e.g. gb1b2c3d4e5f's ADD COLUMN) are already baked into every
+# bootstrapped schema and must never be replayed on CockroachDB.
+CRDB_BASELINE_REVISION = "gc1b2c3d4e5f"
 CRDB_MINIMUM_VERSION = Version("23.2.28")
 CRDB_TESTED_VERSIONS = frozenset(
     {Version("23.2.28"), Version("24.3.20"), Version("25.2.10"), Version("25.4.5")}
