@@ -16,6 +16,7 @@ from typing import Any
 
 from packaging.version import InvalidVersion, Version
 from sqlalchemy import Engine, Index, inspect, text
+from sqlalchemy.engine import make_url
 
 from omnigent.db.query_context import query_name_scope
 
@@ -326,6 +327,10 @@ def _initialize_or_verify_crdb_schema(engine: Engine, db_uri: str) -> None:
             current,
             head,
         )
+        # Never echo the raw URI: it may embed a password, and startup
+        # errors land in logs and deployment consoles with broader read
+        # access than the database credential itself.
+        safe_uri = make_url(db_uri).render_as_string(hide_password=True)
         try:
             _run_migrations(engine, db_uri)
         except Exception as exc:
@@ -333,7 +338,7 @@ def _initialize_or_verify_crdb_schema(engine: Engine, db_uri: str) -> None:
                 "CockroachDB schema migration failed "
                 f"(found revision {current!r}, expected {head!r}). "
                 "Take a backup, then run\n\n"
-                f"    omnigent debug db-upgrade {db_uri!r}\n\n"
+                f"    omnigent debug db-upgrade {safe_uri!r}\n\n"
                 "to inspect or retry the migration manually."
             ) from exc
         migrated = _get_current_db_revision(engine)
@@ -342,7 +347,7 @@ def _initialize_or_verify_crdb_schema(engine: Engine, db_uri: str) -> None:
                 "CockroachDB schema migration did not reach head "
                 f"(started at {current!r}, now at {migrated!r}, expected {head!r}). "
                 "Take a backup, then run\n\n"
-                f"    omnigent debug db-upgrade {db_uri!r}\n\n"
+                f"    omnigent debug db-upgrade {safe_uri!r}\n\n"
                 "to inspect or retry the migration manually."
             )
     _finish_crdb_bootstrap(engine, version)
