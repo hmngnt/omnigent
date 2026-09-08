@@ -3277,6 +3277,9 @@ nimble = [
 openshell = [
     { name = "openshell" },
 ]
+postgres = [
+    { name = "psycopg", extra = ["binary"] },
+]
 s3 = [
     { name = "boto3" },
     { name = "botocore" },
@@ -3393,6 +3396,7 @@ requires-dist = [
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.0,<2" },
     { name = "nimble-python", marker = "extra == 'nimble'", specifier = ">=1.2.0,<2" },
     { name = "numpy", marker = "extra == 'dictation'", specifier = ">=1.24,<3" },
+    { name = "omnigent", extras = ["postgres"], marker = "extra == 'databricks'" },
     { name = "omnigent-client", editable = "sdks/python-client" },
     { name = "omnigent-slack", marker = "extra == 'slack'", editable = "integrations/slack" },
     { name = "omnigent-ui-sdk", editable = "sdks/ui" },
@@ -3423,7 +3427,7 @@ requires-dist = [
     { name = "protobuf", marker = "extra == 'antigravity'", specifier = ">=7,<8" },
     { name = "psutil", specifier = ">=5.9,<8" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'cockroachdb'", specifier = ">=3.1,<4" },
-    { name = "psycopg", extras = ["binary"], marker = "extra == 'databricks'", specifier = ">=3.1,<4" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1,<4" },
     { name = "pydantic", specifier = ">=2.0,<3" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8,<3" },
     { name = "pymysql", marker = "extra == 'databricks'", specifier = ">=1.1,<2" },
@@ -3443,7 +3447,7 @@ requires-dist = [
     { name = "websockets", specifier = ">=10.4,<15" },
     { name = "zstandard", specifier = ">=0.22,<1" },
 ]
-provides-extras = ["claude-sdk", "openai-agents", "cockroachdb", "all", "bedrock", "kms", "s3", "vertex", "modal", "daytona", "blaxel", "boxlite", "microsandbox", "cwsandbox", "e2b", "islo", "openshell", "kubernetes", "vault", "tracing", "agents-sdk", "antigravity", "copilot", "dictation", "cursor", "hindsight", "nimble", "slack", "databricks", "loadtest"]
+provides-extras = ["claude-sdk", "openai-agents", "cockroachdb", "all", "bedrock", "kms", "s3", "vertex", "modal", "daytona", "blaxel", "boxlite", "microsandbox", "cwsandbox", "e2b", "islo", "openshell", "kubernetes", "vault", "tracing", "agents-sdk", "antigravity", "copilot", "dictation", "cursor", "hindsight", "nimble", "slack", "postgres", "databricks", "loadtest"]
 
 [package.metadata.requires-dev]
 dev = [
