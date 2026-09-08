@@ -16,10 +16,10 @@ cockroachdb+psycopg://user:password@host:26257/database
 
 ## Compatibility
 
-Omnigent requires CockroachDB v23.2.28 or newer. The supported version
-matrix — v23.2.28, v24.3.20, v25.2.10, and v25.4.5 — is exercised by the
-local compatibility suite (`just crdb-test`, see
-[Persistent local matrix](#persistent-local-matrix)).
+Omnigent requires CockroachDB v23.2.28 or newer. CI tests the minimum
+supported version (v23.2.28); the full matrix — v23.2.28, v24.3.20,
+v25.2.10, and v25.4.5 — runs via the local compatibility suite
+(`just crdb-test`, see [Persistent local matrix](#persistent-local-matrix)).
 
 CockroachDB v23.2 provides `READ COMMITTED` as an opt-in preview. Enable it
 before starting Omnigent:
