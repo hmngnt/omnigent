@@ -78,6 +78,8 @@ class Host:
     :param terminating_sandbox_id: Provider-assigned id detached from the
         active generation and awaiting provider termination. A newly launched
         generation may coexist in ``sandbox_id`` while this cleanup retries.
+    :param deleted_at: Logical deletion timestamp. A managed host with pending
+        provider cleanup keeps an internal tombstone row until cleanup succeeds.
     :param configured_harnesses: Per-harness readiness reported in the
         host's last ``host.hello`` frame, e.g.
         ``{"claude-sdk": True, "codex": False}``. ``None`` when the
@@ -95,6 +97,7 @@ class Host:
     sandbox_id: str | None = None
     configured_harnesses: dict[str, HarnessAvailability] | None = None
     terminating_sandbox_id: str | None = None
+    deleted_at: int | None = None
 
 
 def host_is_live(host: Host, now: int | None = None) -> bool:
@@ -163,6 +166,7 @@ def _row_to_host(row: SqlHost) -> Host:
         sandbox_provider=row.sandbox_provider,
         sandbox_id=row.sandbox_id,
         terminating_sandbox_id=row.terminating_sandbox_id,
+        deleted_at=row.deleted_at,
         configured_harnesses=_parse_configured_harnesses(row.configured_harnesses),
     )
 
@@ -288,6 +292,7 @@ class HostStore:
                             SqlHost.token_expires_at.is_not(None),
                             SqlHost.token_expires_at >= now,
                             SqlHost.sandbox_id.is_not(None),
+                            SqlHost.deleted_at.is_(None),
                         )
                         .values(
                             name=name,
@@ -307,6 +312,8 @@ class HostStore:
             # Primary lookup: by (workspace_id, host_id) — the new PK.
             row = session.get(SqlHost, (current_workspace_id(), host_id))
             if row is not None:
+                if row.deleted_at is not None:
+                    raise ValueError("host has been deleted")
                 # W2-class boundary: a different user must not claim another
                 # user's host_id. Raise the same IntegrityError the old UNIQUE
                 # constraint produced so the tunnel handler rejects the hijack.
@@ -347,6 +354,7 @@ class HostStore:
                     SqlHost.workspace_id == current_workspace_id(),
                     SqlHost.user_id == user_id,
                     SqlHost.name == name,
+                    SqlHost.deleted_at.is_(None),
                 )
             ).scalar_one_or_none()
             if existing_by_name is not None:
@@ -515,7 +523,9 @@ class HostStore:
         """
         existing = session.execute(
             select(SqlHost).where(
-                SqlHost.workspace_id == current_workspace_id(), SqlHost.host_id == host_id
+                SqlHost.workspace_id == current_workspace_id(),
+                SqlHost.host_id == host_id,
+                SqlHost.deleted_at.is_(None),
             )
         ).scalar_one_or_none()
         if existing is None:
@@ -526,6 +536,7 @@ class HostStore:
             .where(
                 SqlHost.workspace_id == current_workspace_id(),
                 SqlHost.host_id == host_id,
+                SqlHost.deleted_at.is_(None),
             )
             .values(
                 user_id=user_id,
@@ -562,7 +573,9 @@ class HostStore:
         def write(session: Session) -> None:
             row = session.execute(
                 select(SqlHost).where(
-                    SqlHost.workspace_id == current_workspace_id(), SqlHost.host_id == host_id
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.host_id == host_id,
+                    SqlHost.deleted_at.is_(None),
                 )
             ).scalar_one_or_none()
             if row is not None:
@@ -590,6 +603,7 @@ class HostStore:
                 .where(
                     SqlHost.workspace_id == current_workspace_id(),
                     SqlHost.host_id == host_id,
+                    SqlHost.deleted_at.is_(None),
                 )
                 .values(
                     configured_harnesses=harnesses_json,
@@ -625,6 +639,7 @@ class HostStore:
                 .where(
                     SqlHost.workspace_id == current_workspace_id(),
                     SqlHost.host_id == host_id,
+                    SqlHost.deleted_at.is_(None),
                 )
                 .values(updated_at=updated_at)
             )
@@ -677,6 +692,7 @@ class HostStore:
                 select(SqlHost.host_id, SqlHost.status, SqlHost.updated_at).where(
                     SqlHost.workspace_id == current_workspace_id(),
                     SqlHost.host_id.in_(unique_ids),
+                    SqlHost.deleted_at.is_(None),
                 )
             ).all()
         online_code = encode_host_status("online")
@@ -703,6 +719,7 @@ class HostStore:
                 .filter(
                     SqlHost.workspace_id == current_workspace_id(),
                     SqlHost.user_id == user_id,
+                    SqlHost.deleted_at.is_(None),
                 )
                 .order_by(SqlHost.updated_at.desc())
                 .all()
@@ -748,6 +765,7 @@ class HostStore:
                     SqlHost.workspace_id == current_workspace_id(),
                     SqlHost.sandbox_provider.is_not(None),
                     or_(
+                        SqlHost.deleted_at.is_not(None),
                         SqlHost.terminating_sandbox_id.is_not(None),
                         and_(
                             SqlHost.terminating_sandbox_id.is_(None),
@@ -772,7 +790,9 @@ class HostStore:
         with self._session("select_host_by_id") as session:
             row = session.execute(
                 select(SqlHost).where(
-                    SqlHost.workspace_id == current_workspace_id(), SqlHost.host_id == host_id
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.host_id == host_id,
+                    SqlHost.deleted_at.is_(None),
                 )
             ).scalar_one_or_none()
             if row is None:
@@ -863,6 +883,8 @@ class HostStore:
             ).scalar_one_or_none()
             if existing is None:
                 return None
+            if existing.deleted_at is not None:
+                return None
             if existing.user_id != user_id:
                 raise ValueError(
                     f"host {host_id!r} is registered to a different user; "
@@ -914,6 +936,7 @@ class HostStore:
                         SqlHost.sandbox_id == sandbox_id,
                         SqlHost.updated_at == expected_updated_at,
                         SqlHost.sandbox_provider.is_not(None),
+                        SqlHost.deleted_at.is_(None),
                         or_(
                             SqlHost.terminating_sandbox_id.is_(None),
                             SqlHost.terminating_sandbox_id != sandbox_id,
@@ -958,6 +981,7 @@ class HostStore:
                 select(SqlHost).where(
                     SqlHost.workspace_id == current_workspace_id(),
                     SqlHost.host_id == host_id,
+                    SqlHost.deleted_at.is_(None),
                 )
             ).scalar_one_or_none()
             # token_expires_at is written together with token_hash, so a
@@ -974,19 +998,16 @@ class HostStore:
 
     def delete_host(self, host_id: str) -> Host | None:
         """
-        Atomically take and delete a host row.
+        Logically delete a host and retain pending sandbox cleanup.
 
-        Managed-host teardown: removes the host from the picker AND
-        revokes its launch token in one operation (the row IS the
-        credential). Explicitly nulls ``conversations.host_id`` for any
-        sessions still bound to this host — the DB no longer cascades
-        this via FK. No-op when the row does not exist — deletion is
-        invoked from best-effort cleanup paths that may race. The row lock
-        serializes deletion with managed-host generation replacement, and the
-        returned snapshot lets teardown target the generation actually removed.
+        The row is immediately hidden, its credential is revoked, and bound
+        sessions are detached. Managed hosts with recorded sandbox ids remain
+        as internal tombstones until provider cleanup succeeds; rows without
+        cleanup work are physically deleted immediately. The row lock serializes
+        deletion with managed-host generation replacement.
 
         :param host_id: Host identifier, e.g. ``"host_a1b2c3d4..."``.
-        :returns: The deleted host snapshot, or ``None`` when already absent.
+        :returns: The latest host snapshot, or ``None`` when already absent.
         """
 
         def write(session: Session) -> Host | None:
@@ -1009,13 +1030,21 @@ class HostStore:
                 )
                 .values(host_id=None)
             )
-            session.execute(
-                sql_delete(SqlHost).where(
-                    SqlHost.workspace_id == current_workspace_id(),
-                    SqlHost.host_id == host_id,
+            if row.sandbox_provider is None or (
+                row.sandbox_id is None and row.terminating_sandbox_id is None
+            ):
+                session.execute(
+                    sql_delete(SqlHost).where(
+                        SqlHost.workspace_id == current_workspace_id(),
+                        SqlHost.host_id == host_id,
+                    )
                 )
-            )
-            return deleted
+                return deleted
+            row.token_hash = None
+            row.token_expires_at = None
+            row.status = encode_host_status("offline")
+            row.deleted_at = row.deleted_at or now_epoch()
+            return _row_to_host(row)
 
         return run_write_transaction(self._lifecycle_session, "delete_host", write)
 
@@ -1049,6 +1078,7 @@ class HostStore:
                         SqlHost.sandbox_id == sandbox_id,
                         SqlHost.updated_at == expected_updated_at,
                         SqlHost.sandbox_provider.is_not(None),
+                        SqlHost.deleted_at.is_(None),
                         SqlHost.terminating_sandbox_id.is_(None),
                     )
                     .values(
@@ -1062,32 +1092,48 @@ class HostStore:
             )
             return result.rowcount == 1
 
-    def mark_terminating_sandbox_terminated(
+    def mark_sandbox_terminated(
         self,
         host_id: str,
         *,
         sandbox_id: str,
     ) -> bool:
-        """Clear one successfully terminated pending sandbox id.
+        """Clear one terminated sandbox id and remove an empty tombstone.
+
+        Active ids may be cleared only after the host is logically deleted.
+        Otherwise, the id must already be detached into the pending slot.
 
         :param host_id: Durable managed host identifier.
-        :param sandbox_id: Exact pending provider id that was terminated.
-        :returns: ``True`` when that pending id was cleared.
+        :param sandbox_id: Exact provider id that was terminated.
+        :returns: ``True`` when that recorded id was cleared.
         """
-        with self._session("mark_terminating_sandbox_terminated") as session:
-            result = cast(
-                CursorResult[tuple[object]],
-                session.execute(
-                    update(SqlHost)
-                    .where(
-                        SqlHost.workspace_id == current_workspace_id(),
-                        SqlHost.host_id == host_id,
-                        SqlHost.terminating_sandbox_id == sandbox_id,
-                    )
-                    .values(terminating_sandbox_id=None)
-                ),
-            )
-            return result.rowcount == 1
+        with self._lifecycle_session("mark_sandbox_terminated") as session:
+            row = session.execute(
+                select(SqlHost)
+                .where(
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.host_id == host_id,
+                )
+                .with_for_update()
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+
+            if row.deleted_at is None:
+                if row.terminating_sandbox_id != sandbox_id:
+                    return False
+                row.terminating_sandbox_id = None
+                return True
+
+            if sandbox_id not in {row.sandbox_id, row.terminating_sandbox_id}:
+                return False
+            if row.sandbox_id == sandbox_id:
+                row.sandbox_id = None
+            if row.terminating_sandbox_id == sandbox_id:
+                row.terminating_sandbox_id = None
+            if row.sandbox_id is None and row.terminating_sandbox_id is None:
+                session.delete(row)
+            return True
 
     def revoke_launch_token(self, host_id: str) -> None:
         """
@@ -1108,7 +1154,9 @@ class HostStore:
         def write(session: Session) -> None:
             row = session.execute(
                 select(SqlHost).where(
-                    SqlHost.workspace_id == current_workspace_id(), SqlHost.host_id == host_id
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.host_id == host_id,
+                    SqlHost.deleted_at.is_(None),
                 )
             ).scalar_one_or_none()
             if row is None:

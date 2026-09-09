@@ -29,7 +29,7 @@ _logger = logging.getLogger(__name__)
 # exist at an earlier revision, and migrations between the old baseline and
 # this head (e.g. gb1b2c3d4e5f's ADD COLUMN) are already baked into every
 # bootstrapped schema and must never be replayed on CockroachDB.
-CRDB_BASELINE_REVISION = "gc1b2c3d4e5f"
+CRDB_BASELINE_REVISION = "ge1b2c3d4e5f"
 CRDB_MINIMUM_VERSION = Version("23.2.28")
 CRDB_TESTED_VERSIONS = frozenset(
     {Version("23.2.28"), Version("24.3.20"), Version("25.2.10"), Version("25.4.5")}
