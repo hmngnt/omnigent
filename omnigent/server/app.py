@@ -102,7 +102,6 @@ from omnigent.server.routes.sessions import (
 from omnigent.server.routes.sharing import create_sharing_router
 from omnigent.server.routes.terminal_attach import create_terminal_attach_router
 from omnigent.server.routes.usage import create_usage_router
-from omnigent.server.routes.user_settings import create_user_settings_router
 from omnigent.server.runner_session_init import RunnerSessionInitializer
 from omnigent.server.scheduled import ScheduledTaskScheduler
 from omnigent.server.ws_origin import WebSocketOriginMiddleware
@@ -1084,6 +1083,8 @@ def create_app(
     sandbox_config: ManagedSandboxDeployment | None = None,
     github_config: Any | None = None,  # GitHubAppConfig — GitHub App integration
     github_store: Any | None = None,  # GithubConnectionStore — GitHub App integration
+    databricks_config: Any | None = None,  # DatabricksConfig — Databricks Connect
+    databricks_store: Any | None = None,  # DatabricksConnectionStore — Databricks Connect
     sharing_mode: SharingMode | Callable[[], SharingMode] | None = None,
     public_sharing: bool | Callable[[], bool] | None = None,
     server_config: dict[str, Any] | None = None,
@@ -1573,7 +1574,10 @@ def create_app(
     # enabled_connections list and the router mounting below both read these.
     from omnigent.server.connections_registry import connection_providers
 
-    _connection_inputs = {"github": (github_config, github_store)}
+    _connection_inputs = {
+        "github": (github_config, github_store),
+        "databricks": (databricks_config, databricks_store),
+    }
     for _provider in connection_providers():
         _cfg, _store = _connection_inputs.get(_provider.name, (None, None))
         _on = _cfg is not None and _store is not None
@@ -2383,7 +2387,7 @@ def create_app(
         # and its connection store are present.
         enabled_connections = [
             provider
-            for provider in ("github",)
+            for provider in ("github", "databricks")
             if getattr(app.state, f"{provider}_config", None) is not None
             and getattr(app.state, f"{provider}_store", None) is not None
         ]
@@ -2726,12 +2730,6 @@ def create_app(
         prefix="/v1",
         tags=["sharing"],
     )
-    app.include_router(
-        create_user_settings_router(auth_provider, permission_store),
-        prefix="/v1",
-        tags=["user_settings"],
-    )
-
     # First-class projects (owner-private session containers). Mounted only
     # when a project store is wired; the endpoints self-scope to the caller.
     if project_store is not None:
@@ -2859,9 +2857,11 @@ def create_app(
             )
             return
         runner_session_initializer.invalidate_runner(runner_id)
-        # Graceful disconnect: clear the persisted liveness stamp so other
-        # replicas flip offline immediately rather than after the TTL.
-        session_live_state.clear_runner_liveness(runner_id)
+        # Graceful disconnect: clear the persisted liveness stamp so other replicas
+        # flip offline at once. Not on our own shutdown: the runner is alive and
+        # re-tunnels to the replacement, which must not settle its turns to idle.
+        if not shutdown_state.server_shutting_down():
+            session_live_state.clear_runner_liveness(runner_id)
 
         # Replace any pending timer so a rapid drop-reconnect-drop gives
         # each outage a full grace window.
@@ -3240,6 +3240,44 @@ def create_app(
                 type(auth_provider).__name__,
             )
 
+        # Client-credentials grant (RFC 6749 §4.4): a machine client mints a
+        # delegated, path-scoped token with no browser in the loop. It is a
+        # grant_type BRANCH of the one /oauth/token mounted below, never a
+        # second router on that path — FastAPI resolves first-match-wins, so a
+        # duplicate route would be shadowed with no warning. Opt-in and
+        # default-off: the factory returns None unless a machine client is
+        # configured and its principal passes the admin vetting.
+        # See designs/CLIENT_CREDENTIALS.md.
+        handle_client_credentials = None
+        if isinstance(auth_provider, UnifiedAuthProvider) and auth_provider._source in (
+            "oidc",
+            "accounts",
+        ):
+            from omnigent.server.routes.client_credentials import (
+                MachineClientConfig,
+                create_client_credentials_handler,
+            )
+
+            if device_grant_store is None:
+                # Both /oauth/token mounts below need the grant store, so there
+                # is no endpoint to carry this branch. Parse the config anyway:
+                # from_env raises on a malformed one, so an operator error still
+                # surfaces at startup, and a machine client that cannot take
+                # effect is reported rather than silently dropped. Decided here
+                # rather than after building the handler, so the factory never
+                # logs the grant as enabled when nothing can answer it.
+                if MachineClientConfig.from_env() is not None:
+                    _logger.warning(
+                        "client-credentials: a machine client is configured, but no "
+                        "device-grant store was built (this deploy has no permission "
+                        "store), so /oauth/token is not mounted and the grant cannot "
+                        "answer. Configure a permission store."
+                    )
+            else:
+                handle_client_credentials = create_client_credentials_handler(
+                    auth_provider, permission_store
+                )
+
         # Device Authorization Grant (RFC 8628): opt-in, default-off via
         # OMNIGENT_DEVICE_GRANT_ENABLED. Supported in accounts and oidc
         # modes (both own a server-minted session cookie). Header mode has
@@ -3263,7 +3301,11 @@ def create_app(
             from omnigent.server.routes.device_auth import create_device_auth_router
 
             app.include_router(
-                create_device_auth_router(auth_provider, device_grant_store),
+                create_device_auth_router(
+                    auth_provider,
+                    device_grant_store,
+                    handle_client_credentials=handle_client_credentials,
+                ),
                 tags=["oauth"],
             )
             _logger.info("device-grant: /oauth/* routes enabled")
@@ -3298,7 +3340,11 @@ def create_app(
             from omnigent.server.routes.device_auth import create_oauth_token_router
 
             app.include_router(
-                create_oauth_token_router(auth_provider, device_grant_store),
+                create_oauth_token_router(
+                    auth_provider,
+                    device_grant_store,
+                    handle_client_credentials=handle_client_credentials,
+                ),
                 tags=["oauth"],
             )
             _logger.info("login-grant: /oauth/token + /oauth/revoke enabled")

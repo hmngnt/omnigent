@@ -2597,8 +2597,19 @@
         "type": "object"
       },
       "HostModelOptionsResponse": {
-        "description": "Pre-launch model choices resolved by a host harness.",
+        "description": "Pre-launch model choices resolved by a host harness.\n\n`error` carries the host's reason for an empty catalog \u2014 a probe that\nfailed on the host is not a transport failure, so the request still\nsucceeds and the picker can say WHY it is empty instead of a generic\n\"Models unavailable\".",
         "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
           "models": {
             "items": {
               "additionalProperties": true,
@@ -2662,6 +2673,17 @@
             "default": false,
             "title": "Force",
             "type": "boolean"
+          },
+          "host_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Host Id"
           },
           "items": {
             "items": {
@@ -8514,20 +8536,6 @@
         "title": "UsageReport",
         "type": "object"
       },
-      "UserSettingsUpdate": {
-        "description": "Writable current-user settings.",
-        "properties": {
-          "background_session_titles_enabled": {
-            "title": "Background Session Titles Enabled",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "background_session_titles_enabled"
-        ],
-        "title": "UserSettingsUpdate",
-        "type": "object"
-      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -14065,6 +14073,22 @@
               "title": "Session Id",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "pr_url",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pr Url"
+            }
           }
         ],
         "responses": {
@@ -14106,6 +14130,22 @@
             "schema": {
               "title": "Session Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pr_url",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pr Url"
             }
           }
         ],
@@ -14172,6 +14212,46 @@
           }
         },
         "summary": "Set Session Github Preference",
+        "tags": [
+          "session_resources"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/resources/github/prs": {
+      "post": {
+        "operationId": "update_session_github_pr_v1_sessions__session_id__resources_github_prs_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Session Github Pr",
         "tags": [
           "session_resources"
         ]
@@ -14664,74 +14744,6 @@
         "summary": "Get Usage",
         "tags": [
           "usage"
-        ]
-      }
-    },
-    "/v1/user-settings": {
-      "get": {
-        "operationId": "get_user_settings_v1_user_settings_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": {
-                    "type": "boolean"
-                  },
-                  "title": "Response Get User Settings V1 User Settings Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get User Settings",
-        "tags": [
-          "user_settings"
-        ]
-      },
-      "put": {
-        "operationId": "update_user_settings_v1_user_settings_put",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UserSettingsUpdate"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": {
-                    "type": "boolean"
-                  },
-                  "title": "Response Update User Settings V1 User Settings Put",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Update User Settings",
-        "tags": [
-          "user_settings"
         ]
       }
     }
