@@ -11,6 +11,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import {
   composeSandboxWorkspace,
+  composeSandboxWorkspaces,
   deriveHomeDir,
   deriveRepoName,
   describeCreateError,
@@ -512,6 +513,18 @@ describe("sandbox repository helpers", () => {
     ["  https://github.com/org/repo  ", " main ", "https://github.com/org/repo#main"],
   ])("composeSandboxWorkspace(%j, %j) === %j", (url, branch, expected) => {
     expect(composeSandboxWorkspace(url, branch)).toBe(expected);
+  });
+
+  it("composeSandboxWorkspaces maps each selection and drops blank-url entries", () => {
+    expect(
+      composeSandboxWorkspaces([
+        { url: "https://github.com/org/api", branch: "main" },
+        { url: "https://github.com/org/web", branch: "" },
+        // A stray blank-URL entry contributes nothing (never invents "#main").
+        { url: "   ", branch: "dev" },
+      ]),
+    ).toEqual(["https://github.com/org/api#main", "https://github.com/org/web"]);
+    expect(composeSandboxWorkspaces([])).toEqual([]);
   });
 
   it.each<[string, string | null]>([

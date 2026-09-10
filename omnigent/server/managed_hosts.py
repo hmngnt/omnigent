@@ -164,7 +164,7 @@ import re
 import secrets
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING, cast
@@ -173,6 +173,11 @@ import click
 from fastapi import HTTPException
 
 from omnigent.db.utils import builtin_agent_id, now_epoch
+
+# RepoWorkspace lives in the launcher's own package so a launcher can accept it
+# without importing omnigent.server; re-exported here (its parser is here) so
+# existing `from omnigent.server.managed_hosts import RepoWorkspace` keeps working.
+from omnigent.onboarding.sandboxes.types import RepoWorkspace
 from omnigent.stores.host_store import Host, HostStore
 
 if TYPE_CHECKING:
@@ -710,32 +715,6 @@ class ManagedHostLaunch:
 
     host_id: str
     workspace: str
-
-
-@dataclass
-class RepoWorkspace:
-    """
-    Parsed repository-URL workspace for a managed session.
-
-    A managed create's ``workspace`` is a git repository URL with an
-    optional ``#<branch>`` fragment (Docker build-context style): the
-    URL fully describes what the server materializes inside the
-    sandbox. Built by :func:`parse_repo_workspace` — construct via the
-    parser, not directly, so every field has been validated.
-
-    :param url: The clone URL with any fragment stripped, e.g.
-        ``"https://github.com/org/repo.git"`` or
-        ``"git@github.com:org/repo.git"``.
-    :param branch: Branch to clone (``--branch … --single-branch``),
-        e.g. ``"release-1.2"``, or ``None`` for the default branch.
-    :param repo_name: Directory name the clone lands in under the
-        sandbox workspace, derived from the URL's last path segment
-        with ``.git`` stripped, e.g. ``"repo"``.
-    """
-
-    url: str
-    branch: str | None
-    repo_name: str
 
 
 # A full 40-hex object id — rejected as a clone fragment: cloning a
@@ -3106,7 +3085,7 @@ async def launch_managed_host(
     config: ManagedSandboxDeployment,
     owner: str,
     host_store: HostStore,
-    repo: RepoWorkspace | None = None,
+    repos: Sequence[RepoWorkspace] = (),
     provider: str | None = None,
     agent_name: str | None = None,
     on_stage: Callable[[str], None] | None = None,
@@ -3116,12 +3095,11 @@ async def launch_managed_host(
 
     Sequence: provision sandbox → pre-register the host row with its
     launch-token digest (so the credential resolves by the time the
-    host dials the tunnel) → optionally clone the requested repository
-    → start ``omnigent host`` inside the sandbox with the token +
-    identity in its environment → poll the hosts table until the host
-    is online. Any failure after provisioning terminates the sandbox
-    and deletes the host row (which revokes the token) before
-    re-raising.
+    host dials the tunnel) → clone the requested repositories → start
+    ``omnigent host`` inside the sandbox with the token + identity in its
+    environment → poll the hosts table until the host is online. Any
+    failure after provisioning terminates the sandbox and deletes the
+    host row (which revokes the token) before re-raising.
 
     :param config: The deployment's offered providers (YAML-parsed or
         wrapped around a directly-constructed embedding config).
@@ -3131,12 +3109,14 @@ async def launch_managed_host(
     :param host_store: Persistent host registrations — receives the
         pre-registered host row and is polled for the sandbox host
         coming online.
-    :param repo: Parsed repository-URL workspace to clone into the
-        sandbox as the session's working directory, or ``None`` for
-        an empty workspace. Private repositories authenticate via the
-        host image's git credential helper when the sandbox env
-        carries ``GIT_TOKEN`` (injected through Modal secrets — see
-        deploy/modal/README.md "Git credentials").
+    :param repos: Parsed repository-URL workspaces to clone into the
+        sandbox (empty for an empty workspace). One repo becomes the
+        session's working directory; several are cloned as siblings and
+        the working directory is the parent that holds them. Private
+        repositories authenticate via the host image's git credential
+        helper when the sandbox env carries ``GIT_TOKEN`` (injected
+        through Modal secrets — see deploy/modal/README.md "Git
+        credentials").
     :param provider: Which configured provider to launch on, e.g.
         ``"modal"``. ``None`` takes the deployment's default (first)
         provider — what a request that names none gets.
@@ -3179,7 +3159,7 @@ async def launch_managed_host(
         host_name=host_name,
         owner=owner,
         sandbox_id=sandbox_id,
-        repo=repo,
+        repos=repos,
         agent_name=agent_name,
         on_stage=on_stage,
     )
@@ -3191,7 +3171,7 @@ async def relaunch_managed_host(
     config: ManagedSandboxDeployment,
     host: Host,
     host_store: HostStore,
-    repo: RepoWorkspace | None = None,
+    repos: Sequence[RepoWorkspace] = (),
     agent_name: str | None = None,
     on_stage: Callable[[str], None] | None = None,
 ) -> ManagedHostLaunch:
@@ -3207,8 +3187,8 @@ async def relaunch_managed_host(
     atomically revokes the previous generation's token).
 
     The new sandbox starts from the image — workspace contents of the
-    dead generation are gone. Passing *repo* re-clones the session's
-    repository so the workspace is restored to its create-time state.
+    dead generation are gone. Passing *repos* re-clones the session's
+    repositories so the workspace is restored to its create-time state.
 
     Unlike a first launch, a failure here keeps the host row (only the
     new sandbox is torn down and the armed token revoked), so the
@@ -3218,8 +3198,8 @@ async def relaunch_managed_host(
     :param host: The existing managed host row to relaunch
         (``sandbox_provider`` set; callers guard on that).
     :param host_store: Persistent host registrations.
-    :param repo: Repository to re-clone as the workspace, or ``None``
-        for an empty workspace.
+    :param repos: Repositories to re-clone as the workspace (empty for an
+        empty workspace), matching the create-time selection.
     :param agent_name: Server-resolved built-in agent name the session runs,
         re-stamped as the new runner Pod's ``omnigent.ai/agent`` classifier
         (Kubernetes only), or ``None`` to leave it unstamped.
@@ -3270,7 +3250,7 @@ async def relaunch_managed_host(
             host_name=host.name,
             owner=host.user_id,
             sandbox_id=sandbox_id,
-            repo=repo,
+            repos=repos,
             agent_name=agent_name,
             on_stage=on_stage,
             keep_host_on_failure=True,
@@ -3291,9 +3271,7 @@ async def _start_sandbox_host(
     host_id: str,
     host_name: str,
     server_url: str,
-    repo_url: str | None,
-    repo_branch: str | None,
-    repo_name: str | None,
+    repos: Sequence[RepoWorkspace],
     host_config: dict[str, object] | None,
     agent_name: str | None = None,
     on_stage: Callable[[str], None] | None = None,
@@ -3316,9 +3294,7 @@ async def _start_sandbox_host(
             host_id=host_id,
             host_name=host_name,
             server_url=server_url,
-            repo_url=repo_url,
-            repo_branch=repo_branch,
-            repo_name=repo_name,
+            repos=repos,
             host_config=host_config,
             on_stage=on_stage,
             agent_name=agent_name,
@@ -3331,9 +3307,7 @@ async def _start_sandbox_host(
             host_id=host_id,
             host_name=host_name,
             server_url=server_url,
-            repo_url=repo_url,
-            repo_branch=repo_branch,
-            repo_name=repo_name,
+            repos=repos,
         )
     if host_config is None:
         return await asyncio.to_thread(
@@ -3343,9 +3317,7 @@ async def _start_sandbox_host(
             host_id=host_id,
             host_name=host_name,
             server_url=server_url,
-            repo_url=repo_url,
-            repo_branch=repo_branch,
-            repo_name=repo_name,
+            repos=repos,
             on_stage=on_stage,
         )
     if on_stage is None:
@@ -3356,9 +3328,7 @@ async def _start_sandbox_host(
             host_id=host_id,
             host_name=host_name,
             server_url=server_url,
-            repo_url=repo_url,
-            repo_branch=repo_branch,
-            repo_name=repo_name,
+            repos=repos,
             host_config=host_config,
         )
     return await asyncio.to_thread(
@@ -3368,9 +3338,7 @@ async def _start_sandbox_host(
         host_id=host_id,
         host_name=host_name,
         server_url=server_url,
-        repo_url=repo_url,
-        repo_branch=repo_branch,
-        repo_name=repo_name,
+        repos=repos,
         host_config=host_config,
         on_stage=on_stage,
     )
@@ -3385,7 +3353,7 @@ async def _register_and_start_host(
     host_name: str,
     owner: str,
     sandbox_id: str,
-    repo: RepoWorkspace | None = None,
+    repos: Sequence[RepoWorkspace] = (),
     agent_name: str | None = None,
     on_stage: Callable[[str], None] | None = None,
     keep_host_on_failure: bool = False,
@@ -3412,8 +3380,9 @@ async def _register_and_start_host(
     :param owner: User the managed host acts for, e.g.
         ``"alice@example.com"``.
     :param sandbox_id: The provisioned sandbox, e.g. ``"sb-a1b2c3"``.
-    :param repo: Repository to clone as the workspace, or ``None``
-        for an empty workspace.
+    :param repos: Repositories to clone into the workspace (empty for an
+        empty workspace). One repo → the agent's cwd is that clone dir;
+        several → the workspace root that parents them all.
     :param agent_name: Server-resolved built-in agent name the session runs,
         forwarded to ``start_host`` only for launchers that declare
         ``classifies_runner_by_agent`` (Kubernetes stamps it as the runner
@@ -3462,8 +3431,7 @@ async def _register_and_start_host(
         # Uniform across providers: provision() fixed the sandbox id and the
         # token was armed against it above, so start_host starts the host with
         # a token that already resolves. The exec-model default execs in; the
-        # entrypoint model (k8s) creates the Pod that boots the host. *repo* is
-        # unpacked into primitives — the launcher API takes no RepoWorkspace.
+        # entrypoint model (k8s) creates the Pod that boots the host.
         workspace = await _start_sandbox_host(
             launcher,
             sandbox_id,
@@ -3471,9 +3439,7 @@ async def _register_and_start_host(
             host_id=host_id,
             host_name=host_name,
             server_url=config.server_url,
-            repo_url=repo.url if repo is not None else None,
-            repo_branch=repo.branch if repo is not None else None,
-            repo_name=repo.repo_name if repo is not None else None,
+            repos=repos,
             host_config=config.host_config,
             agent_name=agent_name,
             on_stage=on_stage,
@@ -3749,9 +3715,7 @@ async def resume_managed_host(
                 host_id=host.host_id,
                 host_name=host.name,
                 server_url=entry.server_url,
-                repo_url=None,  # the persistent volume already holds the workspace
-                repo_branch=None,
-                repo_name=None,
+                repos=(),  # the persistent volume already holds the workspace
                 host_config=entry.host_config,
                 on_stage=on_stage,
                 agent_name=agent_name,

@@ -65,7 +65,7 @@ def test_host_context_defaults() -> None:
     assert ctx.host_id == "hid"
     assert ctx.host_name == "hname"
     assert ctx.server_url == "https://srv"
-    assert ctx.repo_url is None
+    assert ctx.repos == []
     assert ctx.on_stage is None
     assert ctx.host_config == {}
 

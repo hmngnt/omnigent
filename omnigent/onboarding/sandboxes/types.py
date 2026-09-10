@@ -125,6 +125,32 @@ class SandboxInfo:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class RepoWorkspace:
+    """
+    A single repository to materialize in a managed sandbox's workspace.
+
+    Server code builds these via ``parse_repo_workspace`` (which validates
+    the URL and branch); the launcher surface only reads the fields. Lives
+    here rather than in the server package so a launcher can accept it
+    without importing ``omnigent.server`` (an onboarding→server dependency
+    the entrypoint-as-host launchers deliberately avoid).
+
+    :param url: The clone URL with any ``#<branch>`` fragment stripped,
+        e.g. ``"https://github.com/org/repo.git"`` or
+        ``"git@github.com:org/repo.git"``.
+    :param branch: Branch to clone (``--branch … --single-branch``), or
+        ``None`` for the default branch.
+    :param repo_name: Directory the clone lands in under the sandbox
+        workspace, derived from the URL's last path segment, e.g.
+        ``"repo"``.
+    """
+
+    url: str
+    branch: str | None
+    repo_name: str
+
+
 @dataclass
 class HostContext:
     """Context handed to ``start_host`` when launching a managed host."""
@@ -133,8 +159,6 @@ class HostContext:
     host_id: str
     host_name: str
     server_url: str
-    repo_url: str | None = None
-    repo_branch: str | None = None
-    repo_name: str | None = None
+    repos: list[RepoWorkspace] = field(default_factory=list)
     host_config: dict[str, object] = field(default_factory=dict)
     on_stage: Callable[[str], None] | None = None

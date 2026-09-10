@@ -247,7 +247,7 @@ def register_core_routes(
         agent_id: str | None,
         user_id: str | None,
         sandbox_provider: str | None,
-        workspace: str | None,
+        workspaces: list[str],
     ) -> None:
         """
         Provision a managed sandbox host for a just-created session.
@@ -273,9 +273,11 @@ def register_core_routes(
             owner).
         :param sandbox_provider: Provider to provision, or ``None`` for
             the server's first configured provider.
-        :param workspace: Managed workspace — a git repository URL
-            (optionally ``#<branch>``) cloned into the sandbox, or
-            ``None`` for an empty sandbox.
+        :param workspaces: Managed workspaces — git repository URLs
+            (each optionally ``#<branch>``) cloned into the sandbox in
+            parallel; empty for an empty sandbox. One repo becomes the
+            session's working directory; several are cloned as siblings
+            and the working directory is the parent that holds them.
         :raises OmnigentError: If managed hosts aren't configured or the
             provider isn't offered.
         """
@@ -304,17 +306,18 @@ def register_core_routes(
                 code=ErrorCode.INVALID_INPUT,
             )
         # A managed workspace is a repository URL (schema-validated) the
-        # launch clones inside the sandbox; parse it now so a malformed
+        # launch clones inside the sandbox; parse each now so a malformed
         # URL is a synchronous 4xx, not a background failure.
-        repo = parse_repo_workspace(workspace) if workspace is not None else None
-        if workspace is not None:
+        repos = [parse_repo_workspace(w) for w in workspaces]
+        if workspaces:
             # The session row's workspace is overwritten with the CLONED
-            # path at bind time; record the raw request value so a
-            # sandbox relaunch can re-clone the same repository.
+            # path at bind time; record the raw request value(s) so a
+            # sandbox relaunch can re-clone the same repositories. Repo
+            # URLs never contain whitespace, so a space join round-trips.
             await asyncio.to_thread(
                 conversation_store.set_labels,
                 session_id,
-                {MANAGED_REPO_LABEL_KEY: workspace},
+                {MANAGED_REPO_LABEL_KEY: " ".join(workspaces)},
             )
         managed_launches.begin(session_id)
         # Seed the launch-progress indicator before the background task
@@ -329,7 +332,7 @@ def register_core_routes(
                 # host registers under the reserved local owner.
                 owner=user_id if user_id is not None else RESERVED_USER_LOCAL,
                 sandbox_config=sandbox_config,
-                repo=repo,
+                repos=repos,
                 tracker=managed_launches,
                 conversation_store=conversation_store,
                 host_store=host_store_for_managed,
@@ -670,7 +673,7 @@ def register_core_routes(
                 agent_id=conv.agent_id if conv is not None else None,
                 user_id=user_id,
                 sandbox_provider=body.sandbox_provider,
-                workspace=body.workspace,
+                workspaces=body.managed_repo_workspaces(),
             )
 
         # Host launch: if a host is targeted (caller-supplied or
@@ -843,7 +846,11 @@ def register_core_routes(
                 agent_id=result.agent_id,
                 user_id=user_id,
                 sandbox_provider=parsed_metadata.sandbox_provider,
-                workspace=parsed_metadata.workspace,
+                # Bundle metadata carries a single repo; multi-repo is a
+                # web-picker (JSON) feature. Empty list = no repo.
+                workspaces=[parsed_metadata.workspace]
+                if parsed_metadata.workspace is not None
+                else [],
             )
         # Caller-supplied external host: bind + launch a runner on it,
         # exactly like the JSON create form (same authorization, atomic

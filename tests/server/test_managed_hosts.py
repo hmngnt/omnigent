@@ -8,6 +8,7 @@ import re
 import sys
 import types
 import uuid
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -2457,9 +2458,7 @@ async def test_launch_and_resume_without_optional_kwargs_support_legacy_start_ho
             host_id: str,
             host_name: str,
             server_url: str,
-            repo_url: str | None = None,
-            repo_branch: str | None = None,
-            repo_name: str | None = None,
+            repos: Sequence[RepoWorkspace] = (),
         ) -> str:
             return super().start_host(
                 sandbox_id,
@@ -2467,9 +2466,7 @@ async def test_launch_and_resume_without_optional_kwargs_support_legacy_start_ho
                 host_id=host_id,
                 host_name=host_name,
                 server_url=server_url,
-                repo_url=repo_url,
-                repo_branch=repo_branch,
-                repo_name=repo_name,
+                repos=repos,
             )
 
     fake = _LegacySignatureLauncher(on_host_start=_register, can_resume=True)
@@ -2668,7 +2665,7 @@ async def test_launch_with_repo_clones_into_workspace(db_uri: str) -> None:
         config=_injected_config(fake),
         owner=_OWNER,
         host_store=host_store,
-        repo=parse_repo_workspace("https://github.com/org/myrepo.git#release-1.2"),
+        repos=[parse_repo_workspace("https://github.com/org/myrepo.git#release-1.2")],
     )
 
     # The session workspace is the clone directory, named after the repo.
@@ -2704,7 +2701,7 @@ async def test_launch_clone_failure_terminates_and_deletes_host(db_uri: str) -> 
             config=_injected_config(fake),
             owner=_OWNER,
             host_store=host_store,
-            repo=parse_repo_workspace("https://github.com/org/private#main"),
+            repos=[parse_repo_workspace("https://github.com/org/private#main")],
         )
     assert exc.value.status_code == 502
     assert "failed to clone repository 'https://github.com/org/private'" in exc.value.detail
@@ -2751,9 +2748,7 @@ class _EntrypointFakeLauncher(FakeSandboxLauncher):
         host_id: str,
         host_name: str,
         server_url: str,
-        repo_url: str | None = None,
-        repo_branch: str | None = None,
-        repo_name: str | None = None,
+        repos: Sequence[RepoWorkspace] = (),
         host_config: dict[str, object] | None = None,
         on_stage=None,
     ) -> str:
@@ -2764,8 +2759,7 @@ class _EntrypointFakeLauncher(FakeSandboxLauncher):
                 "token": token,
                 "host_id": host_id,
                 "server_url": server_url,
-                "repo_url": repo_url,
-                "repo_name": repo_name,
+                "repos": list(repos),
             }
         )
         # The token was registered before start_host, so it resolves now.
@@ -2774,7 +2768,12 @@ class _EntrypointFakeLauncher(FakeSandboxLauncher):
         )
         # Simulate the host's entrypoint dialing back over the tunnel.
         self._host_store.upsert_on_connect(host_id=host_id, name=host_name, user_id=_OWNER)
-        return f"/home/omnigent/workspace/{repo_name}" if repo_name else "/home/omnigent/workspace"
+        # One repo → its clone dir; none or several → the workspace parent.
+        return (
+            f"/home/omnigent/workspace/{repos[0].repo_name}"
+            if len(repos) == 1
+            else "/home/omnigent/workspace"
+        )
 
 
 async def test_launch_entrypoint_provider_arms_token_before_launch_host(db_uri: str) -> None:
@@ -2790,7 +2789,7 @@ async def test_launch_entrypoint_provider_arms_token_before_launch_host(db_uri: 
         config=_injected_config(fake),
         owner=_OWNER,
         host_store=host_store,
-        repo=parse_repo_workspace("https://github.com/org/repo.git#main"),
+        repos=[parse_repo_workspace("https://github.com/org/repo.git#main")],
     )
 
     # start_host ran once, with the reserved id and repo info.
@@ -2798,8 +2797,8 @@ async def test_launch_entrypoint_provider_arms_token_before_launch_host(db_uri: 
     call = fake.start_calls[0]
     assert call["sandbox_id"] == "omnigent-pod-1"
     assert call["server_url"] == "https://srv.example.com"
-    assert call["repo_url"] == "https://github.com/org/repo.git"
-    assert call["repo_name"] == "repo"
+    assert [r.url for r in call["repos"]] == ["https://github.com/org/repo.git"]
+    assert [r.repo_name for r in call["repos"]] == ["repo"]
     # The token was already resolvable when start_host ran (no dial-back race).
     assert fake.token_resolved_at_start is True
     # The workspace (cloned dir) is returned and the host is online + bound.
@@ -4348,7 +4347,7 @@ async def test_run_managed_launch_leaves_the_runner_unclassified(
         session_id="conv_1",
         owner=_OWNER,
         sandbox_config=SimpleNamespace(),
-        repo=None,
+        repos=[],
         tracker=ManagedLaunchTracker(),
         conversation_store=SimpleNamespace(),
         host_store=SimpleNamespace(),
@@ -4391,7 +4390,7 @@ async def test_run_managed_launch_resolves_the_classifier_on_its_own_task(
         session_id="conv_1",
         owner=_OWNER,
         sandbox_config=SimpleNamespace(),
-        repo=None,
+        repos=[],
         tracker=ManagedLaunchTracker(),
         conversation_store=SimpleNamespace(),
         host_store=SimpleNamespace(),
@@ -4430,7 +4429,7 @@ async def test_run_managed_launch_omits_the_classifier_for_a_session_scoped_impo
         session_id="conv_1",
         owner=_OWNER,
         sandbox_config=SimpleNamespace(),
-        repo=None,
+        repos=[],
         tracker=ManagedLaunchTracker(),
         conversation_store=SimpleNamespace(),
         host_store=SimpleNamespace(),

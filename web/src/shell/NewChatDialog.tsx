@@ -135,7 +135,11 @@ import { readLastHarness, writeLastHarness } from "@/lib/harnessPreferences";
 import { readHideUnconfiguredHarnesses } from "@/lib/harnessVisibilityPreferences";
 import { readDefaultBaseBranch } from "@/lib/baseBranchPreferences";
 import { readAlwaysUseWorktree } from "@/lib/worktreeDefaultPreferences";
-import { readLastSandboxRepo, writeLastSandboxRepo } from "@/lib/repoPreferences";
+import {
+  type LastSandboxRepo,
+  readLastSandboxRepos,
+  writeLastSandboxRepos,
+} from "@/lib/repoPreferences";
 import { readHarnessOptions, writeHarnessOption, type HarnessOptions } from "@/lib/modePreferences";
 import {
   AUTO_HARNESS_DESCRIPTION,
@@ -776,6 +780,22 @@ export function composeSandboxWorkspace(url: string, branch: string): string | u
   if (u === "") return undefined;
   const b = branch.trim();
   return b === "" ? u : `${u}#${b}`;
+}
+
+/**
+ * Compose the managed session's ``workspaces`` list from the selected repos.
+ *
+ * Each ``{url, branch}`` becomes a ``<url>[#<branch>]`` string; blank-URL
+ * entries are dropped. The API clones them in parallel and starts the agent in
+ * the single repo (one entry) or the parent that holds them all (several).
+ *
+ * @param repos The selected repos, in the order the user added them.
+ * @returns The composed workspace strings (may be empty for no repo).
+ */
+export function composeSandboxWorkspaces(repos: LastSandboxRepo[]): string[] {
+  return repos
+    .map((r) => composeSandboxWorkspace(r.url, r.branch))
+    .filter((w): w is string => w !== undefined);
 }
 
 /**
@@ -2252,8 +2272,7 @@ interface LandingDraft {
   selectedHostId: string | null;
   sandboxSelected: boolean;
   sandboxProvider: string | null;
-  sandboxRepoUrl: string;
-  sandboxRepoBranch: string;
+  sandboxRepoSelections: LastSandboxRepo[];
   workspace: string;
   branchName: string;
   autoSeededBranch: string;
@@ -2421,8 +2440,7 @@ export function NewChatLandingScreen() {
           // The repo inputs compose the managed create's workspace string, so
           // they are location state too — keeping them would clone another
           // project's repository into this project's sandbox.
-          sandboxRepoUrl: "",
-          sandboxRepoBranch: "",
+          sandboxRepoSelections: [],
           workspace: "",
           branchName: "",
           // The branch may be the worktree-default's auto-seed, generated for
@@ -2615,16 +2633,33 @@ export function NewChatLandingScreen() {
   // Sandbox repository inputs — composed into the managed create's
   // `workspace` string (`<url>[#<branch>]`); both blank = empty
   // server-created workspace.
-  // Seed from the in-session draft, else the last repo the user launched with
-  // (remembered across visits) so returning users don't re-pick it. The repo
-  // combobox derives its selection from the URL, so a remembered repo the
+  // Seed from the in-session draft, else the last repos the user launched with
+  // (remembered across visits) so returning users don't re-pick them. The repo
+  // combobox derives its selection from each URL, so a remembered repo the
   // account can no longer access just shows unselected.
-  const [sandboxRepoUrl, setSandboxRepoUrl] = useState<string>(
-    () => restoredDraft?.sandboxRepoUrl ?? readLastSandboxRepo()?.url ?? "",
+  const [sandboxRepoSelections, setSandboxRepoSelections] = useState<LastSandboxRepo[]>(
+    () => restoredDraft?.sandboxRepoSelections ?? readLastSandboxRepos(),
   );
-  const [sandboxRepoBranch, setSandboxRepoBranch] = useState<string>(
-    () => restoredDraft?.sandboxRepoBranch ?? readLastSandboxRepo()?.branch ?? "",
-  );
+  // Append a repo (deduped by URL — adding one already picked is a no-op),
+  // remove one, or repoint its branch. Order is preserved so the list reads
+  // the way the user built it.
+  const addSandboxRepo = useCallback((url: string, branch = ""): void => {
+    const u = url.trim();
+    if (u === "") return;
+    setSandboxRepoSelections((prev) =>
+      prev.some((r) => r.url === u) ? prev : [...prev, { url: u, branch: branch.trim() }],
+    );
+  }, []);
+  const removeSandboxRepo = useCallback((url: string): void => {
+    setSandboxRepoSelections((prev) => prev.filter((r) => r.url !== url));
+  }, []);
+  const setSandboxRepoBranch = useCallback((url: string, branch: string): void => {
+    setSandboxRepoSelections((prev) =>
+      prev.map((r) => (r.url === url ? { ...r, branch } : r)),
+    );
+  }, []);
+  // Free-text URL being typed into the "paste a URL" adder (not yet added).
+  const [pendingRepoUrl, setPendingRepoUrl] = useState<string>("");
   // When the server advertises the GitHub App and the caller has connected
   // their account, offer a picker over their repos instead of only the
   // free-text URL. The /repos endpoint returns `connected: false` when the
@@ -2785,8 +2820,7 @@ export function NewChatLandingScreen() {
     selectedHostId,
     sandboxSelected,
     sandboxProvider,
-    sandboxRepoUrl,
-    sandboxRepoBranch,
+    sandboxRepoSelections,
     workspace,
     branchName,
     autoSeededBranch,
@@ -3911,12 +3945,10 @@ export function NewChatLandingScreen() {
     worktreeSeededForRef.current = null;
   }, [prefillConfig, branchName, autoSeededBranch]);
 
-  // Sandbox repo inputs are valid when blank (empty workspace), or when
-  // the URL passes the shape check; a branch without a URL is dangling.
-  const sandboxRepoValid =
-    sandboxRepoUrl.trim() === ""
-      ? sandboxRepoBranch.trim() === ""
-      : isValidSandboxRepoUrl(sandboxRepoUrl);
+  // Sandbox repo inputs are valid when empty (empty workspace) or when every
+  // selected repo's URL passes the shape check. A half-typed URL in the paste
+  // adder never blocks submit — it isn't a selection until the user adds it.
+  const sandboxRepoValid = sandboxRepoSelections.every((r) => isValidSandboxRepoUrl(r.url));
 
   // Sandbox creates need no host or path workspace — the server
   // provisions both; only the message, agent, and (optional) repo
@@ -4109,21 +4141,33 @@ export function NewChatLandingScreen() {
   // The chip shows just the branch (the "(existing)" distinction lives in the
   // popover's warning; appending it here only gets clipped by the chip's cap).
   const worktreeLabel = branchName.trim() || "Worktree";
-  // Sandbox repository chip label: repo name (server's clone-dir rule)
-  // plus the pinned branch, e.g. "repo#main"; placeholder when unset.
-  const sandboxRepoName = deriveRepoName(sandboxRepoUrl);
-  // The connected-GitHub repo (if any) whose clone URL matches the current
-  // free-text value, so the picker <select> stays in sync with the URL field
-  // and we can offer the matching branch list.
-  const selectedSandboxRepo = sandboxRepos.find(
-    (r) => (r.clone_url ?? `https://github.com/${r.full_name}.git`) === sandboxRepoUrl.trim(),
-  );
   const showGithubRepoPicker = githubReposEnabled && sandboxRepoPickerConnected;
-  const sandboxRepoLabel = sandboxRepoName
-    ? sandboxRepoBranch.trim()
-      ? `${sandboxRepoName}#${sandboxRepoBranch.trim()}`
-      : sandboxRepoName
-    : "Repository";
+  // The connected-GitHub repo (if any) a selection URL names, so its row can
+  // offer that repo's branch list. Repos not in the picker (pasted URLs, or a
+  // repo the account lost access to) resolve to undefined and fall back to a
+  // free-text branch input.
+  const repoForUrl = (url: string): GithubRepo | undefined =>
+    sandboxRepos.find(
+      (r) => (r.clone_url ?? `https://github.com/${r.full_name}.git`) === url.trim(),
+    );
+  // The clone URL of a connected repo, matching the server's derivation.
+  const repoCloneUrl = (r: GithubRepo): string =>
+    r.clone_url ?? `https://github.com/${r.full_name}.git`;
+  // Repos not yet selected — the "Add repository" combobox offers only these.
+  const unselectedRepos = sandboxRepos.filter(
+    (r) => !sandboxRepoSelections.some((s) => s.url === repoCloneUrl(r)),
+  );
+  // Sandbox repository chip label: the single repo's name[#branch] (server's
+  // clone-dir rule), a count when several, or a placeholder when none.
+  const sandboxRepoLabel =
+    sandboxRepoSelections.length === 0
+      ? "Repository"
+      : sandboxRepoSelections.length === 1
+        ? ((only) => {
+            const name = deriveRepoName(only.url) ?? "repository";
+            return only.branch.trim() ? `${name}#${only.branch.trim()}` : name;
+          })(sandboxRepoSelections[0])
+        : `${sandboxRepoSelections.length} repositories`;
   // The trigger label is just the agent name; the run-config knobs live in
   // the picker's per-entry submenu, so duplicating their values here would be
   // redundant. Top-level Smart Routing is the exception: it has no agent of its
@@ -4368,11 +4412,11 @@ export function NewChatLandingScreen() {
     // after the user has navigated elsewhere while this component is still
     // mounted in the outgoing transition tree.
     const createLocation = window.location.href;
-    // Remember the repo/branch for next time (seeds the picker on the next
+    // Remember the repos/branches for next time (seeds the picker on the next
     // visit). Only when a repo is actually set — a no-repo session leaves the
-    // remembered repo untouched rather than clearing it.
-    if (sandboxRepoUrl.trim()) {
-      writeLastSandboxRepo(sandboxRepoUrl, sandboxRepoBranch);
+    // remembered repos untouched rather than clearing them.
+    if (sandboxRepoSelections.length > 0) {
+      writeLastSandboxRepos(sandboxRepoSelections);
     }
     setCreating(true);
     setCreateError(null);
@@ -4574,16 +4618,17 @@ export function NewChatLandingScreen() {
             ...(sandboxSelected
               ? {
                   host_type: "managed",
-                  // On a `project_id` create an ABSENT workspace would be
+                  // The repos to clone in parallel; the agent starts in the one
+                  // repo, or the parent that holds them all. Empty = empty
+                  // sandbox workspace.
+                  workspaces: composeSandboxWorkspaces(sandboxRepoSelections),
+                  // On a `project_id` create an ABSENT (path) workspace would be
                   // default-filled with the config's path workspace, which a
-                  // managed create rejects — pin an explicit null instead
-                  // (explicit values are never replaced by project hints).
-                  workspace:
-                    composeSandboxWorkspace(sandboxRepoUrl, sandboxRepoBranch) ??
-                    (createProjectId !== null ? null : undefined),
-                  // Same guard for a config-stored `git` block: a sandbox has
-                  // no host for the server to create a worktree on.
-                  ...(createProjectId !== null ? { git: null } : {}),
+                  // managed create rejects — pin an explicit null (explicit
+                  // values are never replaced by project hints). Same guard for
+                  // a config-stored `git` block: a sandbox has no host for the
+                  // server to create a worktree on.
+                  ...(createProjectId !== null ? { workspace: null, git: null } : {}),
                   // Omitted when null so a default create is unchanged.
                   ...(sandboxProvider !== null ? { sandbox_provider: sandboxProvider } : {}),
                 }
@@ -5628,12 +5673,9 @@ export function NewChatLandingScreen() {
                   <PopoverContent align="start" className="w-96 p-3">
                     <div className="flex flex-col gap-2">
                       <div className="flex items-center gap-1.5">
-                        <label
-                          htmlFor="landing-repo-url"
-                          className="text-sm font-medium text-foreground"
-                        >
-                          Repository (optional)
-                        </label>
+                        <span className="text-sm font-medium text-foreground">
+                          Repositories (optional)
+                        </span>
                         {databricksGitCredentialsTooltipContent && (
                           <Tooltip>
                             <TooltipTrigger asChild>
@@ -5651,25 +5693,69 @@ export function NewChatLandingScreen() {
                           </Tooltip>
                         )}
                       </div>
-                      {/* Connected-GitHub picker: choose one of the caller's
-                        repos + a branch, which fills the same URL/branch state
-                        the free-text inputs below drive. Only shown when the
-                        server advertises the GitHub App and the account is
-                        linked; otherwise the free-text URL is the only path. */}
+                      {/* Selected repos: each clones into its own sibling dir.
+                        A connected repo gets its branch combobox; a pasted URL a
+                        free-text branch. The ✕ removes it. */}
+                      {sandboxRepoSelections.map((sel) => {
+                        const repo = repoForUrl(sel.url);
+                        const name = repo?.full_name ?? deriveRepoName(sel.url) ?? sel.url;
+                        return (
+                          <div
+                            key={sel.url}
+                            className="flex items-center gap-2"
+                            data-testid="new-chat-landing-repo-row"
+                          >
+                            <span className="min-w-0 flex-1 truncate text-sm" title={sel.url}>
+                              {name}
+                            </span>
+                            {repo ? (
+                              <div className="w-36 shrink-0">
+                                <SandboxRepoBranchSelect
+                                  fullName={repo.full_name}
+                                  value={sel.branch}
+                                  defaultBranch={repo.default_branch}
+                                  onChange={(b) => setSandboxRepoBranch(sel.url, b)}
+                                />
+                              </div>
+                            ) : (
+                              <input
+                                type="text"
+                                value={sel.branch}
+                                onChange={(e) => setSandboxRepoBranch(sel.url, e.target.value)}
+                                placeholder="branch"
+                                aria-label={`Branch for ${name}`}
+                                className="w-28 shrink-0 rounded-md border border-input bg-background px-2 py-1 text-xs outline-none transition-colors focus-visible:border-ring"
+                              />
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => removeSandboxRepo(sel.url)}
+                              aria-label={`Remove ${name}`}
+                              className="shrink-0 rounded-sm p-1 text-muted-foreground transition-colors hover:text-foreground"
+                              data-testid="new-chat-landing-repo-remove"
+                            >
+                              <XIcon className="size-3.5" />
+                            </button>
+                          </div>
+                        );
+                      })}
+                      {sandboxRepoSelections.length > 0 && (
+                        <div className="my-0.5 border-t border-border" />
+                      )}
+                      {/* Add from the connected account's repos (only those not
+                        already picked); the free-text URL below is the fallback
+                        for a repo not in the list or when GitHub isn't linked. */}
                       {showGithubRepoPicker && (
                         <>
                           <SandboxRepoCombobox
-                            repos={sandboxRepos}
-                            value={selectedSandboxRepo?.full_name ?? ""}
+                            repos={unselectedRepos}
+                            value=""
                             onSelect={(repo) => {
-                              setSandboxRepoUrl(
-                                repo
-                                  ? (repo.clone_url ?? `https://github.com/${repo.full_name}.git`)
-                                  : "",
-                              );
-                              // A new repo has its own branches — reset so a
-                              // stale branch never rides along.
-                              setSandboxRepoBranch("");
+                              if (repo) {
+                                addSandboxRepo(
+                                  repo.clone_url ?? `https://github.com/${repo.full_name}.git`,
+                                );
+                              }
                             }}
                           />
                           {sandboxReposTruncated && (
@@ -5681,17 +5767,7 @@ export function NewChatLandingScreen() {
                               its URL below.
                             </p>
                           )}
-                          {selectedSandboxRepo && (
-                            <SandboxRepoBranchSelect
-                              fullName={selectedSandboxRepo.full_name}
-                              value={sandboxRepoBranch}
-                              defaultBranch={selectedSandboxRepo.default_branch}
-                              onChange={setSandboxRepoBranch}
-                            />
-                          )}
-                          <p className="text-xs text-muted-foreground">
-                            or paste a repository URL:
-                          </p>
+                          <p className="text-xs text-muted-foreground">or paste a repository URL:</p>
                         </>
                       )}
                       {/* Connected but the repo list failed to load: say so
@@ -5705,32 +5781,43 @@ export function NewChatLandingScreen() {
                           Couldn't load your GitHub repositories. Paste a repository URL below.
                         </p>
                       )}
-                      <input
-                        id="landing-repo-url"
-                        type="text"
-                        value={sandboxRepoUrl}
-                        onChange={(e) => {
-                          // Editing the repo invalidates a branch picked for the
-                          // previous repo, so clear it (mirrors the repo select).
-                          setSandboxRepoUrl(e.target.value);
-                          setSandboxRepoBranch("");
-                        }}
-                        placeholder="https://github.com/org/repo"
-                        className="rounded-md border border-input bg-background px-3 py-2 text-sm outline-none transition-colors focus-visible:border-ring"
-                        data-testid="new-chat-landing-repo-input"
-                      />
-                      <input
-                        type="text"
-                        value={sandboxRepoBranch}
-                        onChange={(e) => setSandboxRepoBranch(e.target.value)}
-                        placeholder="Branch (defaults to the repo's default)"
-                        aria-label="Repository branch"
-                        className="rounded-md border border-input bg-background px-3 py-2 text-sm outline-none transition-colors focus-visible:border-ring"
-                        data-testid="new-chat-landing-repo-branch-input"
-                      />
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={pendingRepoUrl}
+                          onChange={(e) => setPendingRepoUrl(e.target.value)}
+                          onKeyDown={(e) => {
+                            // Enter adds the repo (same as the Add button), so a
+                            // paste-then-Enter flow never needs the mouse.
+                            if (e.key === "Enter" && isValidSandboxRepoUrl(pendingRepoUrl)) {
+                              e.preventDefault();
+                              addSandboxRepo(pendingRepoUrl);
+                              setPendingRepoUrl("");
+                            }
+                          }}
+                          placeholder="https://github.com/org/repo"
+                          aria-label="Repository URL"
+                          className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm outline-none transition-colors focus-visible:border-ring"
+                          data-testid="new-chat-landing-repo-input"
+                        />
+                        <button
+                          type="button"
+                          disabled={!isValidSandboxRepoUrl(pendingRepoUrl)}
+                          onClick={() => {
+                            addSandboxRepo(pendingRepoUrl);
+                            setPendingRepoUrl("");
+                          }}
+                          className="flex shrink-0 items-center gap-1 rounded-md border border-input px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40"
+                          data-testid="new-chat-landing-repo-add"
+                        >
+                          <PlusIcon className="size-3.5" />
+                          Add
+                        </button>
+                      </div>
                       <p className="text-sm text-muted-foreground">
-                        Cloned into the sandbox as the session's working directory. Leave blank to
-                        start in an empty workspace.
+                        Cloned into the sandbox at startup. Several repos are cloned side by side and
+                        the agent starts in the parent that holds them; pick one and it starts
+                        directly inside it. Leave empty for a blank workspace.
                       </p>
                     </div>
                   </PopoverContent>

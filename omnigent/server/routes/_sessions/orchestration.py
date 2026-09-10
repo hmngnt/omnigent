@@ -2941,7 +2941,7 @@ async def _run_managed_launch(
     session_id: str,
     owner: str,
     sandbox_config: ManagedSandboxDeployment,
-    repo: RepoWorkspace | None,
+    repos: Sequence[RepoWorkspace],
     tracker: ManagedLaunchTracker,
     conversation_store: ConversationStore,
     host_store: HostStore,
@@ -3030,7 +3030,7 @@ async def _run_managed_launch(
         session_id=session_id,
         owner=owner,
         sandbox_config=sandbox_config,
-        repo=repo,
+        repos=repos,
         tracker=tracker,
         host_store=host_store,
         relaunch_host=relaunch_host,
@@ -3617,17 +3617,17 @@ def _kick_managed_relaunch(
         parse_repo_workspace,
     )
 
-    # Re-clone the repository the session was created with so the
-    # fresh generation's workspace matches the create-time state.
-    # The label holds the raw create-time value, already validated
-    # by the create's parse — a parse failure here means the label
-    # was tampered with, and the relaunch proceeds with an empty
-    # workspace rather than dying.
-    repo = None
+    # Re-clone the repositories the session was created with so the
+    # fresh generation's workspace matches the create-time state. The
+    # label holds the raw create-time value(s), space-joined (repo URLs
+    # never contain whitespace) and already validated by the create's
+    # parse — a parse failure here means the label was tampered with, and
+    # the relaunch proceeds with an empty workspace rather than dying.
+    repos: list[RepoWorkspace] = []
     raw_repo = conv.labels.get(MANAGED_REPO_LABEL_KEY)
     if raw_repo is not None:
         try:
-            repo = parse_repo_workspace(raw_repo)
+            repos = [parse_repo_workspace(w) for w in raw_repo.split()]
         except ValueError:
             _logger.warning(
                 "Session %s has an unparseable %s label (%r); relaunching with an empty workspace",
@@ -3636,6 +3636,7 @@ def _kick_managed_relaunch(
                 raw_repo,
                 extra={"session_id": session_id},
             )
+            repos = []
     _logger.info(
         "Managed sandbox for session %s (host %s) is gone; relaunching a new generation",
         session_id,
@@ -3658,7 +3659,7 @@ def _kick_managed_relaunch(
             session_id=session_id,
             owner=host.user_id,
             sandbox_config=sandbox_config,
-            repo=repo,
+            repos=repos,
             tracker=tracker,
             conversation_store=conversation_store,
             host_store=host_store,
