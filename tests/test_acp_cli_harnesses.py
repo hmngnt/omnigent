@@ -110,6 +110,36 @@ def test_spawn_env_forwards_cwd_sandbox_and_quotes_command(
     assert "HARNESS_ACP_MODEL" not in env
 
 
+def test_jcode_connect_injects_gateway_env_and_passthrough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a managed-connect host, the jcode row's spawn env carries the broker bearer +
+    per-session runtime dir and names BOTH in HARNESS_ACP_ENV_PASSTHROUGH — mandatory,
+    since the ACP wrap forwards only passthrough-named vars to the jcode subprocess."""
+    monkeypatch.setattr(
+        "omnigent.host.jcode_databricks.connect_jcode_gateway_env",
+        lambda: {"JCODE_DBX_TOKEN": "fresh-bearer", "JCODE_RUNTIME_DIR": "/tmp/jc-run-xyz"},
+    )
+    env = _build_acp_cli_spawn_env(_spec("jcode"), harness="jcode")
+    assert env["JCODE_DBX_TOKEN"] == "fresh-bearer"
+    assert env["JCODE_RUNTIME_DIR"] == "/tmp/jc-run-xyz"
+    names = set(env["HARNESS_ACP_ENV_PASSTHROUGH"].split(","))
+    assert {"JCODE_DBX_TOKEN", "JCODE_RUNTIME_DIR"} <= names
+
+
+def test_jcode_no_connect_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Off a managed-connect host (connect_jcode_gateway_env returns None), the jcode row's
+    spawn env carries no JCODE_* vars and no passthrough — laptop/non-connect untouched."""
+    monkeypatch.setattr(
+        "omnigent.host.jcode_databricks.connect_jcode_gateway_env",
+        lambda: None,
+    )
+    env = _build_acp_cli_spawn_env(_spec("jcode"), harness="jcode")
+    assert "JCODE_DBX_TOKEN" not in env
+    assert "JCODE_RUNTIME_DIR" not in env
+    assert "HARNESS_ACP_ENV_PASSTHROUGH" not in env
+
+
 def test_spawn_env_honors_path_override_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(ACP_CLI_HARNESSES, "fakecli", _FAKE_ROW)
     monkeypatch.setenv("OMNIGENT_FAKECLI_PATH", "/custom/fakecli")
@@ -285,3 +315,8 @@ def test_spawn_env_forwards_permission_mode(monkeypatch: pytest.MonkeyPatch) -> 
     assert "HARNESS_ACP_PERMISSION_MODE" not in _build_acp_cli_spawn_env(
         _spec("fakecli"), harness="fakecli"
     )
+
+
+# ---------------------------------------------------------------------------
+# jcode managed-connect support
+# ---------------------------------------------------------------------------
