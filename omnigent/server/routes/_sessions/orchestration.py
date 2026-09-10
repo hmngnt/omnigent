@@ -58,6 +58,12 @@ from omnigent.host.frames import (
 from omnigent.host.frames import (
     WORKSPACE_MISSING_ERROR_CODE as _WORKSPACE_MISSING_ERROR_CODE,
 )
+from omnigent.host.frames import (
+    classify_launch_refusal as _classify_launch_refusal,
+)
+from omnigent.host.frames import (
+    workspace_missing_message as _workspace_missing_message,
+)
 from omnigent.llms.context_window import resolve_effective_context_window
 from omnigent.models.model_metadata import concrete_reported_model
 from omnigent.native.native_coding_agents import (
@@ -3507,34 +3513,42 @@ async def ensure_runner_connected(
             # Record the refusal message in runner_exit_reports so the
             # runner_failed_to_start error surfaces the actionable cause
             # rather than the generic "may have failed to start" fallback.
-            _fatal_refusal = launch_attempt.error_code in (
-                _HARNESS_NOT_CONFIGURED_ERROR_CODE,
-                _WORKSPACE_MISSING_ERROR_CODE,
+            _refusal_code = _classify_launch_refusal(
+                launch_attempt.error_code,
+                launch_attempt.error,
+                conv.workspace,
             )
-            if _fatal_refusal and raise_host_refusal:
-                error_code = (
-                    ErrorCode.HARNESS_NOT_CONFIGURED
-                    if launch_attempt.error_code == _HARNESS_NOT_CONFIGURED_ERROR_CODE
-                    else ErrorCode.WORKSPACE_MISSING
-                )
+            if _refusal_code == _WORKSPACE_MISSING_ERROR_CODE:
+                # Rebuild from the authorized session row: the host's own
+                # text is untrusted and may carry log tails or secrets.
+                # Harness refusals keep the host's text by design: it is a
+                # deterministic setup hint, not runner output.
+                _refusal_message = _workspace_missing_message(conv.workspace)
+            else:
+                _refusal_message = launch_attempt.error or ""
+            if _refusal_code is not None and raise_host_refusal:
                 raise OmnigentError(
-                    launch_attempt.error
+                    _refusal_message
                     or (
                         "The session harness is not configured on this host."
-                        if error_code == ErrorCode.HARNESS_NOT_CONFIGURED
+                        if _refusal_code == _HARNESS_NOT_CONFIGURED_ERROR_CODE
                         else "The session workspace no longer exists on the host."
                     ),
-                    code=error_code,
+                    code=(
+                        ErrorCode.HARNESS_NOT_CONFIGURED
+                        if _refusal_code == _HARNESS_NOT_CONFIGURED_ERROR_CODE
+                        else ErrorCode.WORKSPACE_MISSING
+                    ),
                 )
-            if _fatal_refusal and launch_attempt.error is not None:
+            if _refusal_code is not None and _refusal_message:
                 _rer = getattr(app_state, "runner_exit_reports", None)
                 if _rer is not None:
                     _rer.record(
                         launch_attempt.runner_id,
-                        launch_attempt.error,
-                        owner=None,
+                        _refusal_message,
+                        owner=host_conn.owner,
                     )
-            if not _fatal_refusal:
+            if _refusal_code is None:
                 relaunched_runner_id = launch_attempt.runner_id
         elif await _maybe_relaunch_managed_sandbox(
             session_id=session_id,
@@ -4251,54 +4265,53 @@ async def _persist_host_launch_failure_turn(
     runner_router: RunnerRouter | None,
     *,
     created_by: str | None,
+    host_error_code: str,
 ) -> str:
     """
     Persist a consumed user message and a host-launch failure error.
 
     Used when a message arrives for a host-bound session whose runner is
-    dead and the host *refuses* to relaunch because the agent's harness
-    isn't configured there (the daemon's structured
-    ``harness_not_configured`` reply). The message is the real
-    runner-start attempt, so — exactly like a native terminal that can't
-    boot (:func:`_persist_native_terminal_failure`) — the server records
-    the user's message (so the input is consumed, not silently dropped)
-    and a sibling ``type="error"`` item carrying the host's message
-    (which names the fix, ``omnigent setup``), then publishes the same
-    live error/status events the web renders as an error banner. The host
-    binding is left intact so a later message relaunches once the user has
-    run setup.
+    dead and the host deterministically refuses the relaunch. The message
+    is the real runner-start attempt, so — exactly like a native terminal
+    that can't boot (:func:`_persist_native_terminal_failure`) — the server
+    records the user's message (so the input is consumed, not silently
+    dropped) and a sibling ``type="error"`` item carrying the host's
+    reason, then publishes the same live error/status events the web
+    renders as an error banner. The host binding is left intact so a
+    later message can relaunch after remediation.
 
     :param session_id: Session/conversation identifier, e.g.
         ``"conv_abc123"``.
     :param conv: Conversation row for the session.
     :param body: Original user message event.
     :param conversation_store: Store used for the durable append.
-    :param host_error: The host's human-readable refusal, e.g.
-        ``"harness 'codex' is not configured on host 'laptop' — run
-        `omnigent setup` ..."``. ``None`` falls back to a generic
-        ``omnigent setup`` pointer so the banner is never empty.
+    :param host_error: The refusal text to surface. Workspace refusals must
+        pass the server-rebuilt message (see
+        :func:`~omnigent.host.frames.workspace_missing_message`); harness
+        refusals pass the host's own text, which is a deterministic setup
+        hint rather than runner output.
     :param runner_router: Router used to resolve a sub-agent's runner for
         the parent-wake forward, or ``None`` in in-process / test setups.
     :param created_by: Authenticated posting actor, e.g.
         ``"alice@example.com"``; ``None`` in single-user mode.
+    :param host_error_code: Allowlisted structured host failure category.
     :returns: Store-assigned id of the consumed user message item.
     """
+    if host_error_code not in {
+        _HARNESS_NOT_CONFIGURED_ERROR_CODE,
+        _WORKSPACE_MISSING_ERROR_CODE,
+    }:
+        raise ValueError(f"unsafe host launch error code: {host_error_code!r}")
+    fallback_message = (
+        "the agent's harness is not configured on the selected host — "
+        f"run `{cli_invocation()} setup`"
+        if host_error_code == _HARNESS_NOT_CONFIGURED_ERROR_CODE
+        else "The session workspace no longer exists on the selected host."
+    )
     error = ErrorData(
         source="execution",
-        # Stable classifier mirroring the host's wire error code, so the
-        # web can special-case the banner if it ever wants to.
-        code="harness_not_configured",
-        message=(
-            host_error
-            if host_error
-            # Defensive fallback: the daemon always sends a message with
-            # the code, but the banner must stay actionable if a
-            # third-party host omits it.
-            else (
-                f"the agent's harness is not configured on the selected host — "
-                f"run `{cli_invocation()} setup`"
-            )
-        ),
+        code=host_error_code,
+        message=host_error if host_error else fallback_message,
     )
     turn_id = generate_task_id()
     user_item = _build_new_item(body, turn_id, created_by=created_by)
@@ -4319,7 +4332,7 @@ async def _persist_host_launch_failure_turn(
         _publish_error_event(session_id, error)
     _publish_terminal_pending(session_id, False)
     _publish_status(session_id, "failed", ErrorDetail(code=error.code, message=error.message))
-    # A host-launched sub-agent that can't configure must wake its parent,
+    # A host-launched sub-agent that cannot start must wake its parent,
     # the same way a boot failure does — no-ops for top-level sessions.
     await _forward_native_subagent_terminal_failure(session_id, conv, error, runner_router)
     return consumed.id
@@ -7046,6 +7059,11 @@ async def _ensure_runner_relay_ready_impl(
             "Timed out waiting for runner stream relay to subscribe",
             code=ErrorCode.RUNNER_UNAVAILABLE,
         ) from exc
+    # The runner just acknowledged this session's stream. A session bound after
+    # the tunnel connected has no ``runner_last_seen`` until the next ping; stamp
+    # it here so a server recycle in that window cannot read it as orphaned.
+    if runner_id is not None:
+        session_live_state.touch_runner_liveness([runner_id])
     return handle
 
 

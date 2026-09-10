@@ -1881,6 +1881,339 @@ def test_host_stop_force_skips_session_stop(
     assert "sessions_stopped=0" in result.output
 
 
+def test_host_stop_unreachable_server_degrades_to_daemon_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A dead server must not block a plain ``host stop``.
+
+    When the session-list preflight hits connection refused, the server is
+    gone and holds no sessions to stop; the stop should degrade to
+    terminating the daemon instead of failing and stranding it until the
+    user discovers ``--force``.
+    """
+    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    # Identity normalization: the workspace-URL expansion probes the
+    # network and has dedicated tests.
+    monkeypatch.setattr(cli, "_workspace_api_server_url", lambda server: server.rstrip("/"))
+    _write_daemon_registry_record(
+        tmp_path,
+        pid=4242,
+        target="https://server.example.com",
+        mode="server",
+        server_url="https://server.example.com",
+    )
+    monkeypatch.setattr(
+        cli,
+        "_host_http_json",
+        lambda **kwargs: cli._HostHttpResult(
+            status_code=0,
+            body="ConnectError: [Errno 111] Connection refused",
+            unreachable=True,
+        ),
+    )
+    terminated: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "_terminate_daemon",
+        lambda record, *, force: terminated.append(record.target),
+    )
+
+    result = CliRunner().invoke(
+        cli_group,
+        ["host", "stop", "--server", "https://server.example.com"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert terminated == ["https://server.example.com"]
+    assert "sessions_stopped=0" in result.output
+    assert "skipping session stop" in result.output
+
+
+def test_host_stop_undiscoverable_local_server_degrades_to_daemon_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A local daemon whose server vanished still stops without ``--force``.
+
+    A local-mode record with no healthy server to discover and a
+    confirmed-dead server process means the detached server is gone; a
+    plain ``host stop`` should still terminate the daemon rather than
+    error out.
+    """
+    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    _write_daemon_registry_record(
+        tmp_path,
+        pid=4242,
+        target="local",
+        mode="local",
+        server_url=None,
+    )
+    monkeypatch.setattr(cli, "local_server_url_if_healthy", lambda: None)
+    monkeypatch.setattr(cli, "_local_server_confirmed_dead", lambda: True)
+    monkeypatch.setattr(
+        cli,
+        "_host_http_json",
+        lambda **kwargs: pytest.fail(f"unexpected HTTP call: {kwargs}"),
+    )
+    terminated: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "_terminate_daemon",
+        lambda record, *, force: terminated.append(record.target),
+    )
+
+    result = CliRunner().invoke(cli_group, ["host", "stop", "--server", ""])
+
+    assert result.exit_code == 0, result.output
+    assert terminated == ["local"]
+    assert "sessions_stopped=0" in result.output
+
+
+def test_host_http_json_marks_connection_refused_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A loopback connect failure is classified unreachable.
+
+    Binds and releases a loopback port so nothing is listening, then
+    requests it: the ``ConnectError`` must surface as ``status_code=0``
+    with ``unreachable=True`` (a timeout or HTTP error must not).
+    """
+    import socket
+
+    monkeypatch.setenv("OMNIGENT_REMOTE_AUTH_TOKEN", "test-token")
+    monkeypatch.setattr(cli, "_host_http_headers_cache", {})
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+    result = cli._host_http_json(
+        base_url=f"http://127.0.0.1:{port}",
+        method="GET",
+        path="/v1/sessions",
+        timeout_s=2.0,
+    )
+
+    assert result.status_code == 0
+    assert result.unreachable is True
+    assert "ConnectError" in str(result.body)
+
+
+def test_host_stop_slow_local_server_with_live_pid_keeps_force_guidance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A live-but-slow local server must not trigger the daemon-only degrade.
+
+    ``local_server_url_if_healthy`` returns ``None`` on any ``/health``
+    timeout or non-200 even while the server process is alive; that is a
+    slow server, not a gone one, so the stop must fail loudly with the
+    ``--force`` guidance instead of silently reaping the daemon and its
+    record.
+    """
+    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    _write_daemon_registry_record(
+        tmp_path,
+        pid=4242,
+        target="local",
+        mode="local",
+        server_url=None,
+    )
+    monkeypatch.setattr(cli, "local_server_url_if_healthy", lambda: None)
+    monkeypatch.setattr(cli, "_local_server_confirmed_dead", lambda: False)
+    monkeypatch.setattr(
+        cli,
+        "_terminate_daemon",
+        lambda record, *, force: pytest.fail("daemon terminated despite a live server process"),
+    )
+
+    result = CliRunner().invoke(cli_group, ["host", "stop", "--server", ""])
+
+    assert result.exit_code != 0
+    assert "--force" in result.output
+
+
+def test_local_server_confirmed_dead_requires_dead_pid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only a missing pidfile or a dead recorded PID counts as confirmed dead."""
+    pid_path = tmp_path / "local_server.pid"
+    monkeypatch.setattr("omnigent.host.local_server._LOCAL_SERVER_PID_PATH", pid_path)
+
+    # Missing pidfile: no recorded server that could still be alive.
+    assert cli._local_server_confirmed_dead() is True
+
+    # Corrupt pidfile: the server's state is unknown, not provably dead.
+    pid_path.write_text("not-a-pid\n")
+    assert cli._local_server_confirmed_dead() is False
+
+    # Valid pidfile: liveness of the recorded PID decides.
+    pid_path.write_text("4242\n6767\n")
+    monkeypatch.setattr(cli, "_pid_alive", lambda pid: True)
+    assert cli._local_server_confirmed_dead() is False
+
+    monkeypatch.setattr(cli, "_pid_alive", lambda pid: False)
+    assert cli._local_server_confirmed_dead() is True
+
+
+def test_host_http_json_loopback_timeout_is_not_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A loopback timeout stays ``unreachable=False`` — slow is not gone."""
+    import httpx
+
+    monkeypatch.setenv("OMNIGENT_REMOTE_AUTH_TOKEN", "test-token")
+    monkeypatch.setattr(cli, "_host_http_headers_cache", {})
+
+    class _TimingOutClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def __enter__(self) -> _TimingOutClient:
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            return None
+
+        def request(self, *args: Any, **kwargs: Any) -> None:
+            raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(httpx, "Client", _TimingOutClient)
+
+    result = cli._host_http_json(
+        base_url="http://127.0.0.1:6767",
+        method="GET",
+        path="/v1/sessions",
+        timeout_s=2.0,
+    )
+
+    assert result.status_code == 0
+    assert result.unreachable is False
+    assert "ReadTimeout" in str(result.body)
+
+
+def test_host_http_json_loopback_http_error_is_not_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A loopback HTTP 500 stays ``unreachable=False`` — erroring is not gone."""
+    import httpx
+
+    monkeypatch.setenv("OMNIGENT_REMOTE_AUTH_TOKEN", "test-token")
+    monkeypatch.setattr(cli, "_host_http_headers_cache", {})
+
+    class _Response:
+        status_code = 500
+
+        @staticmethod
+        def json() -> dict[str, str]:
+            return {"detail": "internal error"}
+
+    class _ErroringClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def __enter__(self) -> _ErroringClient:
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            return None
+
+        def request(self, *args: Any, **kwargs: Any) -> _Response:
+            return _Response()
+
+    monkeypatch.setattr(httpx, "Client", _ErroringClient)
+
+    result = cli._host_http_json(
+        base_url="http://127.0.0.1:6767",
+        method="GET",
+        path="/v1/sessions",
+        timeout_s=2.0,
+    )
+
+    assert result.status_code == 500
+    assert result.unreachable is False
+
+
+def test_host_http_json_remote_connect_failure_is_not_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connect failure against a remote host keeps ``unreachable=False``.
+
+    DNS hiccups, network blips, or TLS faults can be transient against a
+    live remote server, so the auto-degrade must stay restricted to
+    loopback targets; remote failures keep the loud ``--force`` guidance.
+    """
+    import httpx
+
+    monkeypatch.setenv("OMNIGENT_REMOTE_AUTH_TOKEN", "test-token")
+    monkeypatch.setattr(cli, "_host_http_headers_cache", {})
+
+    class _RefusingClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def __enter__(self) -> _RefusingClient:
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            return None
+
+        def request(self, *args: Any, **kwargs: Any) -> None:
+            raise httpx.ConnectError("[Errno -2] Name or service not known")
+
+    monkeypatch.setattr(httpx, "Client", _RefusingClient)
+
+    result = cli._host_http_json(
+        base_url="https://server.example.com",
+        method="GET",
+        path="/v1/sessions",
+        timeout_s=2.0,
+    )
+
+    assert result.status_code == 0
+    assert result.unreachable is False
+    assert "ConnectError" in str(result.body)
+
+
+def test_fetch_session_pages_mid_pagination_failure_is_not_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mid-pagination connect failure is never classified unreachable.
+
+    A server that already served page one is provably alive, so a failure
+    on a later page must surface as a plain error (keeping the ``--force``
+    guidance) rather than triggering the daemon-only degrade and silently
+    skipping the already-listed live sessions.
+    """
+    calls: list[str | None] = []
+
+    def _fake_host_http_json(**kwargs: Any) -> cli._HostHttpResult:
+        after = kwargs["params"].get("after")
+        calls.append(after)
+        if after is None:
+            return cli._HostHttpResult(
+                status_code=200,
+                body={
+                    "data": [{"id": "conv_abc123", "status": "running"}],
+                    "last_id": "conv_abc123",
+                    "has_more": True,
+                },
+            )
+        return cli._HostHttpResult(
+            status_code=0,
+            body="ConnectError: [Errno 111] Connection refused",
+            unreachable=True,
+        )
+
+    monkeypatch.setattr(cli, "_host_http_json", _fake_host_http_json)
+
+    result = cli._fetch_session_pages(
+        base_url="http://127.0.0.1:6767",
+        connected_only=False,
+    )
+
+    assert calls == [None, "conv_abc123"]
+    assert result.error is not None
+    assert result.unreachable is False
+
+
 def test_host_stop_session_stops_only_named_sessions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

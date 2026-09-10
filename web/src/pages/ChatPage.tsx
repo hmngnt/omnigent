@@ -1521,7 +1521,13 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
 
   // Active reply quotes — each "Reply ↵" click appends; consumed by Composer.
   const [replyQuotes, setReplyQuotes] = useState<ReplyQuote[]>([]);
+  const [replyConversationId, setReplyConversationId] = useState(conversationId);
   const nextReplyQuoteId = useRef(0);
+
+  if (replyConversationId !== conversationId) {
+    setReplyConversationId(conversationId);
+    setReplyQuotes([]);
+  }
 
   // Ref forwarded to SelectionPopup to scope selection detection to the
   // conversation area, preventing selections in the composer from triggering
@@ -2228,8 +2234,10 @@ function ComposerStatusLine({
   // cache with the GitHub panel, so opening the tab is instant.
   const github = useGithubInfo(sessionId ?? undefined);
   const openGithubTab = useOpenGithubTab();
-  const prNumber = github.data?.pr?.number ?? null;
-  const showPr = !!conversationId && !isSubAgentSession && prNumber !== null && !!openGithubTab;
+  const prs = github.data?.prs;
+  const prNumber = prs?.[0]?.number ?? github.data?.pr?.number ?? null;
+  const prCount = prs?.length ?? (prNumber !== null ? 1 : 0);
+  const showPr = !!conversationId && !isSubAgentSession && prCount > 0 && !!openGithubTab;
 
   const showPlanMode = !!conversationId && codexPlanMode;
   const showGoal = !!conversationId && goal != null;
@@ -2253,11 +2261,15 @@ function ComposerStatusLine({
             type="button"
             data-testid="composer-pr-link"
             onClick={() => openGithubTab?.()}
-            title="View this PR in the GitHub tab"
+            title={
+              prCount > 1 ? "View these PRs in the GitHub tab" : "View this PR in the GitHub tab"
+            }
             className="flex shrink-0 items-center gap-1.5 rounded text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
           >
             <GithubMono size={14} aria-hidden />
-            <span className="tabular-nums underline underline-offset-2">#{prNumber}</span>
+            <span className="tabular-nums whitespace-nowrap underline underline-offset-2">
+              {prCount > 1 ? `${prCount} PRs` : `#${prNumber}`}
+            </span>
           </button>
         )}
       </div>
@@ -2596,7 +2608,10 @@ function ComposerImpl({
   // server-side (the runner blocks on the verdict Future), so a message
   // sent now would sit queued and unread until the card is answered —
   // and for native wrappers the injected text could land in the vendor
-  // TUI's permission prompt. Lock the composer until the verdict is in.
+  // TUI's permission prompt. Lock the SEND path until the verdict is in
+  // (submit() guard + disabled Send button), but keep the textarea itself
+  // editable: disabling it ejects browser focus mid-word when a prompt
+  // lands while the user is typing, silently dropping their keystrokes.
   // Mirrored sub-agent prompts (targetSessionId set to a child session)
   // don't gate this session's inbox, so they don't lock it.
   const hasPendingElicitation = useChatStore((s) =>
@@ -3377,7 +3392,7 @@ function ComposerImpl({
     // Esc cancels an in-flight turn. When idle it's a no-op — clearing on
     // Esc destroys typed prompts with no undo (common muscle memory after
     // dismissing autocomplete suggestions).
-    if (e.key === "Escape" && isStreaming) {
+    if (e.key === "Escape" && isWorking && !isReadOnly) {
       e.preventDefault();
       onStop();
       return;
@@ -3672,8 +3687,15 @@ function ComposerImpl({
                           : "Send a message…"
             }
             rows={1}
-            disabled={disabled || isReadOnly || unreachable || hasPendingElicitation}
+            // A pending elicitation must NOT disable the textarea: disabling
+            // ejects focus to <body> mid-word and later keystrokes vanish.
+            // The draft stays typable; sending is still gated (submit() +
+            // the disabled Send button) until the prompt is answered.
+            disabled={disabled || isReadOnly || unreachable}
             data-slash-command={composerIsCommand ? "true" : undefined}
+            // Full send intent (text OR attachments OR mentions) for the
+            // approve hotkey's drafting guard, which only sees this element.
+            data-has-draft={hasDraft ? "true" : undefined}
             className={cn(
               // Hand glyph painting to the overlay while a command is drafted;
               // the caret stays visible via caret-foreground.

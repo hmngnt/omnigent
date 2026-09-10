@@ -269,6 +269,100 @@ async def _wait_for_json_state(
     raise AssertionError(f"{path} did not reach expected state; last={last_payload!r}")
 
 
+def test_observer_hook_stderr_is_logged_incrementally(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Hook process errors reach the session-scoped runner log exactly once."""
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    stderr_path = bridge_dir / forwarder.OBSERVER_HOOK_STDERR_FILE
+    stderr_path.write_text("ModuleNotFoundError: No module named 'omnigent'\n", encoding="utf-8")
+    caplog.set_level(logging.ERROR, logger=forwarder.__name__)
+
+    offset = forwarder._log_new_observer_hook_stderr(
+        bridge_dir=bridge_dir,
+        session_id="conv_abc",
+        byte_offset=0,
+    )
+    assert offset == stderr_path.stat().st_size
+    assert "No module named 'omnigent'" in caplog.text
+    assert caplog.records[-1].session_id == "conv_abc"
+
+    with stderr_path.open("a", encoding="utf-8") as handle:
+        handle.write("PermissionError: bridge directory is not writable\n")
+    offset = forwarder._log_new_observer_hook_stderr(
+        bridge_dir=bridge_dir,
+        session_id="conv_abc",
+        byte_offset=offset,
+    )
+    assert offset == stderr_path.stat().st_size
+    assert caplog.text.count("No module named 'omnigent'") == 1
+    assert caplog.text.count("bridge directory is not writable") == 1
+
+    record_count = len(caplog.records)
+    assert (
+        forwarder._log_new_observer_hook_stderr(
+            bridge_dir=bridge_dir,
+            session_id="conv_abc",
+            byte_offset=offset,
+        )
+        == offset
+    )
+    assert len(caplog.records) == record_count
+
+
+def test_missing_transcript_logs_actionable_snapshot_once(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A silent observer failure becomes a bounded, session-scoped error."""
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    record_hook_event(bridge_dir, {"hook_event_name": "UserPromptSubmit"})
+    (bridge_dir / "claude-settings.json").write_text("{}", encoding="utf-8")
+    diagnostics = forwarder._TranscriptDiscoveryDiagnostics(started_at=100.0)
+    warning_at = diagnostics.started_at + forwarder._TRANSCRIPT_DISCOVERY_WARNING_S
+    caplog.set_level(logging.INFO, logger=forwarder.__name__)
+
+    forwarder._observe_transcript_discovery(
+        bridge_dir=bridge_dir,
+        session_id="conv_abc",
+        transcript_path=None,
+        diagnostics=diagnostics,
+        now=warning_at - 0.1,
+    )
+    assert "has not started" not in caplog.text
+
+    for now in (warning_at, warning_at + 30.0):
+        forwarder._observe_transcript_discovery(
+            bridge_dir=bridge_dir,
+            session_id="conv_abc",
+            transcript_path=None,
+            diagnostics=diagnostics,
+            now=now,
+        )
+
+    failures = [record for record in caplog.records if "has not started" in record.getMessage()]
+    assert len(failures) == 1
+    assert failures[0].session_id == "conv_abc"
+    assert "last_hook=UserPromptSubmit" in failures[0].getMessage()
+    assert "observer_stderr_bytes=missing" in failures[0].getMessage()
+    assert "hook_settings=present" in failures[0].getMessage()
+
+    transcript_path = tmp_path / "claude-session.jsonl"
+    for now in (warning_at + 31.0, warning_at + 32.0):
+        forwarder._observe_transcript_discovery(
+            bridge_dir=bridge_dir,
+            session_id="conv_abc",
+            transcript_path=transcript_path,
+            diagnostics=diagnostics,
+            now=now,
+        )
+    discoveries = [record for record in caplog.records if "path discovered" in record.getMessage()]
+    assert len(discoveries) == 1
+
+
 @pytest.mark.asyncio
 async def test_clear_hook_rotates_active_session_without_reprocessing(
     tmp_path: Path,
@@ -3160,22 +3254,23 @@ async def test_forwarder_drops_poison_item_after_bounded_permanent_retries(
 
 
 @pytest.mark.asyncio
-async def test_forwarder_skips_user_item_on_ambiguous_post_failure(tmp_path: Path) -> None:
+async def test_forwarder_retries_user_item_on_ambiguous_post_failure(tmp_path: Path) -> None:
     """
-    An ambiguous POST failure skips the item instead of re-posting it.
+    An ambiguous POST failure holds the cursor and re-posts the item.
 
     A user message typed while Claude is busy round-trips through the
     transcript and is POSTed as an ``external_conversation_item``. If
-    that POST's response is lost (e.g. a read timeout AFTER the server
-    appended the item and published ``session.input.consumed``), the
-    server has already committed it — and external items are not deduped
-    server-side. Retrying would append a second copy and re-publish the
-    consume event, producing a duplicate user bubble in the web UI.
-    The forwarder must instead treat the item as delivered:
-    mark it handled, advance the byte cursor, and never re-POST it.
+    that POST's response is lost (e.g. a read timeout on a flaky
+    forwarder->server hop), the forwarder cannot know whether the server
+    committed the item. Skipping it would silently lose the message from
+    the conversation store whenever the server had NOT committed it —
+    the web view then misses a message the terminal still shows. The
+    POST carries a ``source_id`` idempotency key the server dedupes on,
+    so re-posting a committed item is a no-op: the forwarder must retry.
 
-    A failure here (the item POSTed twice across two polls) is exactly
-    the duplicate-user-message regression this guards against.
+    A failure here (the item marked handled after one ambiguous failure,
+    never re-posted) is exactly the lost-user-message regression this
+    guards against.
     """
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
@@ -3201,20 +3296,25 @@ async def test_forwarder_skips_user_item_on_ambiguous_post_failure(tmp_path: Pat
 
     def _handle_request(request: httpx.Request) -> httpx.Response:
         """
-        Record the POST, then fail the item POST with a read timeout.
+        Fail the first item POST with a read timeout, then succeed.
 
-        The timeout stands in for "server committed, response lost" —
-        the ambiguous case where a blind retry duplicates.
+        The timeout stands in for "request sent, response lost" — the
+        ambiguous case where the server may or may not have committed
+        the item.
 
         :param request: Outbound HTTP request from the forwarder.
-        :returns: HTTP response (never reached for the item POST).
-        :raises httpx.ReadTimeout: For every ``external_conversation_item``
-            POST, simulating a lost response.
+        :returns: HTTP response for every POST after the first item POST.
+        :raises httpx.ReadTimeout: For the first
+            ``external_conversation_item`` POST, simulating a lost
+            response.
         """
         payload = json.loads(request.content.decode("utf-8"))
         assert isinstance(payload, dict)
         requests.append(payload)
-        if payload["type"] == "external_conversation_item":
+        first_item_post = payload["type"] == "external_conversation_item" and (
+            sum(1 for r in requests if r["type"] == "external_conversation_item") == 1
+        )
+        if first_item_post:
             raise httpx.ReadTimeout("response lost", request=request)
         return httpx.Response(202, json={})
 
@@ -3241,18 +3341,25 @@ async def test_forwarder_skips_user_item_on_ambiguous_post_failure(tmp_path: Pat
         )
 
     item_posts = [r for r in requests if r["type"] == "external_conversation_item"]
-    # The item was POSTed exactly once. If the ambiguous-failure skip
-    # were missing, the second poll would re-read offset 0 and POST it
-    # again (len 2) — the duplicate user bubble.
-    assert len(item_posts) == 1
-    # No "failed" status: unlike a permanent 4xx rejection, an ambiguous
-    # failure most likely succeeded, so we must not flag the turn failed.
+    # Re-POSTed on the second poll (2 attempts): the ambiguous failure
+    # must not mark the item handled — skipping it would lose the user
+    # message from the conversation store when the server had not
+    # committed it.
+    assert len(item_posts) == 2
+    # Every attempt carries the same server-side idempotency key, so the
+    # retry is a no-op when the first POST WAS committed — no duplicate
+    # user bubble.
+    source_ids = {post["data"]["source_id"] for post in item_posts}
+    assert source_ids == {"user-msg-1:0:message"}
+    # No "failed" status: unlike a permanent 4xx rejection, a transient
+    # failure is retried, so we must not flag the turn failed.
     assert all(r["type"] != "external_session_status" for r in requests)
-    # Cursor advanced past the item and it is recorded as handled, so it
-    # is not re-read on subsequent polls.
-    assert first.byte_offset == transcript_path.stat().st_size
-    assert first.seen_source_ids == ("user-msg-1:0:message",)
+    # First poll held the cursor (nothing handled); the successful retry
+    # advanced it past the item and recorded it as handled.
+    assert first.byte_offset == 0
+    assert first.seen_source_ids == ()
     assert second.byte_offset == transcript_path.stat().st_size
+    assert second.seen_source_ids == ("user-msg-1:0:message",)
 
 
 @pytest.mark.asyncio
@@ -3263,8 +3370,7 @@ async def test_forwarder_retries_user_item_on_connect_error(tmp_path: Path) -> N
     A connection-refused error proves the request never reached the
     server, so the item was not committed. Dropping it would silently
     lose a user message. The forwarder must hold the cursor and re-POST
-    on the next poll — the complement to the ambiguous-skip behavior, so
-    the duplicate fix does not turn into a message-loss bug.
+    on the next poll.
 
     A failure here (item marked handled / cursor advanced after a
     connect error) would mean a user message is silently lost whenever
@@ -5845,6 +5951,54 @@ def test_subagent_batches_obey_count_and_exact_byte_limits() -> None:
         )
 
 
+def test_oversized_subagent_item_does_not_truncate_identifiers() -> None:
+    """Batch fitting never rewrites schema-significant identifier fields."""
+    name = "n" * forwarder.MAX_SUBAGENT_EVENT_BATCH_BYTES
+    entry = forwarder._PendingSubagentItem(
+        item=ClaudeTranscriptItem(
+            source_id="oversized-name",
+            item_type="function_call",
+            data={"agent": "claude", "name": name, "arguments": "{}", "call_id": "call-1"},
+            response_id="resp-name",
+        )
+    )
+
+    fitted = forwarder._fit_subagent_item(entry)
+
+    assert fitted.drop_reason is not None
+    assert fitted.item.data["name"] == name
+
+
+@pytest.mark.parametrize(
+    ("field_name", "kind"),
+    [("input", "input"), ("stdout", "output"), ("stderr", "output")],
+)
+def test_oversized_subagent_terminal_text_is_truncated(
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+    kind: str,
+) -> None:
+    """Large terminal commands and output are shrunk instead of dropped."""
+    monkeypatch.setattr(forwarder, "MAX_SUBAGENT_EVENT_BATCH_BYTES", 1024)
+    entry = forwarder._PendingSubagentItem(
+        item=ClaudeTranscriptItem(
+            source_id=f"oversized-terminal-{field_name}",
+            item_type="terminal_command",
+            data={"kind": kind, field_name: "x" * 2048},
+            response_id="resp-terminal",
+        )
+    )
+
+    fitted = forwarder._fit_subagent_item(entry)
+
+    assert fitted.drop_reason is None
+    assert fitted.item.data["kind"] == kind
+    terminal_text = fitted.item.data[field_name]
+    assert isinstance(terminal_text, str)
+    assert "content truncated by omnigent" in terminal_text
+    assert len(forwarder._encoded_subagent_batch([fitted])) <= 1024
+
+
 def test_subagent_batch_partitioning_encodes_items_linearly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6249,6 +6403,207 @@ async def test_permanent_batch_failure_redrives_items_individually(
         for line in (bridge_dir / "dead_letter.jsonl").read_text("utf-8").splitlines()
     ]
     assert [record["payload"]["source_id"] for record in dead_letters] == ["poison"]
+
+
+@pytest.mark.asyncio
+async def test_individual_redrive_honors_not_confirmed_retry_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fallback item is retried before a not-confirmed 503 is dead-lettered."""
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    subagents_dir = tmp_path / "subagents"
+    subagents_dir.mkdir()
+    (subagents_dir / "agent-retry.jsonl").write_text("{}\n", encoding="utf-8")
+    item = ClaudeTranscriptItem(
+        source_id="retry-not-confirmed",
+        item_type="message",
+        data={"role": "assistant", "content": [{"type": "text", "text": "hello"}]},
+        response_id="resp-retry",
+    )
+    read_result = TranscriptReadResult(
+        line_cursor=1,
+        byte_offset=10,
+        current_response_id=None,
+        items=[item],
+        record_items=(TranscriptRecordItems(next_byte_offset=10, items=(item,)),),
+    )
+    monkeypatch.setattr(
+        forwarder,
+        "read_transcript_items_from_offset",
+        lambda *args, **kwargs: read_result,
+    )
+    entry = forwarder.SubagentEntry(
+        subagent_id="retry",
+        child_conversation_id="conv_child_retry",
+    )
+    checkpoint = forwarder._SubagentStateCheckpoint(
+        bridge_dir,
+        forwarder.SubagentForwardState(subagents={"retry": entry}),
+    )
+    batch_attempts = 0
+    individual_attempts = 0
+    forward_successes = 0
+
+    def note_forward_success() -> None:
+        nonlocal forward_successes
+        forward_successes += 1
+
+    monkeypatch.setattr(forwarder, "_note_forward_success", note_forward_success)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal batch_attempts, individual_attempts
+        body = json.loads(request.content.decode("utf-8"))
+        if isinstance(body, list):
+            batch_attempts += 1
+        else:
+            individual_attempts += 1
+        return httpx.Response(
+            503,
+            json={"error": "subagent_delivery_not_confirmed"},
+        )
+
+    retry_tracker = forwarder._PostRetryTracker(
+        base_delay_s=0.0,
+        max_permanent_attempts=1,
+        max_not_confirmed_attempts=2,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://ap"
+    ) as client:
+        for _ in range(3):
+            await forwarder._forward_one_subagent(
+                client=client,
+                parent_session_id="conv_parent",
+                bridge_dir=bridge_dir,
+                subagents_dir=subagents_dir,
+                entry=checkpoint.state.subagents["retry"],
+                agent_name="claude-native-ui",
+                checkpoint=checkpoint,
+                item_retry_tracker=retry_tracker,
+                status_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
+                batch_capability=forwarder._SessionEventBatchCapability(),
+            )
+
+    assert batch_attempts == 2
+    assert individual_attempts == 2
+    assert forward_successes == 0
+    assert checkpoint.state.subagents["retry"].byte_offset == 10
+    dead_letters = [
+        json.loads(line)
+        for line in (bridge_dir / "dead_letter.jsonl").read_text("utf-8").splitlines()
+    ]
+    assert [record["payload"]["source_id"] for record in dead_letters] == [item.source_id]
+    assert dead_letters[0]["reason"] == "delivery not confirmed after retries"
+
+
+@pytest.mark.asyncio
+async def test_subagent_batch_backoff_survives_new_tail_items(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Appending later items cannot reset backoff for the failing head item."""
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    subagents_dir = tmp_path / "subagents"
+    subagents_dir.mkdir()
+    (subagents_dir / "agent-backoff.jsonl").write_text("{}\n", encoding="utf-8")
+
+    def transcript_item(source_id: str) -> ClaudeTranscriptItem:
+        return ClaudeTranscriptItem(
+            source_id=source_id,
+            item_type="message",
+            data={"role": "assistant", "content": [{"type": "text", "text": source_id}]},
+            response_id="resp-backoff",
+        )
+
+    first = transcript_item("first")
+    second = transcript_item("second")
+    current_result = TranscriptReadResult(
+        line_cursor=1,
+        byte_offset=10,
+        current_response_id=None,
+        items=[first],
+        record_items=(TranscriptRecordItems(next_byte_offset=10, items=(first,)),),
+    )
+    monkeypatch.setattr(
+        forwarder,
+        "read_transcript_items_from_offset",
+        lambda *args, **kwargs: current_result,
+    )
+    entry = forwarder.SubagentEntry(
+        subagent_id="backoff",
+        child_conversation_id="conv_child_backoff",
+    )
+    checkpoint = forwarder._SubagentStateCheckpoint(
+        bridge_dir,
+        forwarder.SubagentForwardState(subagents={"backoff": entry}),
+    )
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(502, text="unavailable")
+
+    retry_tracker = forwarder._PostRetryTracker(base_delay_s=60.0)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://ap"
+    ) as client:
+        await forwarder._forward_one_subagent(
+            client=client,
+            parent_session_id="conv_parent",
+            bridge_dir=bridge_dir,
+            subagents_dir=subagents_dir,
+            entry=entry,
+            agent_name="claude-native-ui",
+            checkpoint=checkpoint,
+            item_retry_tracker=retry_tracker,
+            status_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
+            batch_capability=forwarder._SessionEventBatchCapability(),
+        )
+        current_result = TranscriptReadResult(
+            line_cursor=2,
+            byte_offset=20,
+            current_response_id=None,
+            items=[first, second],
+            record_items=(
+                TranscriptRecordItems(next_byte_offset=10, items=(first,)),
+                TranscriptRecordItems(next_byte_offset=20, items=(second,)),
+            ),
+        )
+        await forwarder._forward_one_subagent(
+            client=client,
+            parent_session_id="conv_parent",
+            bridge_dir=bridge_dir,
+            subagents_dir=subagents_dir,
+            entry=entry,
+            agent_name="claude-native-ui",
+            checkpoint=checkpoint,
+            item_retry_tracker=retry_tracker,
+            status_retry_tracker=forwarder._PostRetryTracker(base_delay_s=0.0),
+            batch_capability=forwarder._SessionEventBatchCapability(),
+        )
+
+    assert requests == 1
+
+
+@pytest.mark.asyncio
+async def test_subagent_cleanup_swallows_finished_worker_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Rotation cleanup cannot re-raise an already-finished worker error."""
+
+    async def fail() -> forwarder.SubagentForwardState:
+        raise RuntimeError("worker failed")
+
+    task = asyncio.create_task(fail())
+    await asyncio.sleep(0)
+
+    await forwarder._cancel_subagent_forward_task(task)
+
+    assert "worker failed during cleanup" in caplog.text
 
 
 @pytest.mark.asyncio
