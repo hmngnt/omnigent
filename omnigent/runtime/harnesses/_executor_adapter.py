@@ -70,8 +70,10 @@ _MCP_TOOL_NAME_PREFIX = "mcp__"
 
 # Interrupt and reap use SEPARATE budgets: the short slice keeps a wedged interrupt from
 # starving the reap (subprocess-backed executors terminate only in close/close_session).
+# _INTERRUPT_SLICE_S must exceed _PiRpcSession.close()'s inner 2.0s process.wait() so the
+# slice never fires first and inject a CancelledError that bypasses the SIGKILL fallback.
 INTERRUPT_TIMEOUT_S = 3.0
-_INTERRUPT_SLICE_S = 1.5
+_INTERRUPT_SLICE_S = 3.0
 
 # Consecutive orphaned tool callbacks (no active turn context) before forcing a Tier-1 SDK reset.
 # Reset to zero at each ``run_turn`` start so a single late straggler never trips it.
@@ -153,6 +155,7 @@ class ExecutorAdapter(HarnessApp):
         # reload. Dispatched calls never reach this — their ToolCallComplete
         # short-circuits — so it is observed-only.
         self._observed_tool_calls: dict[str, tuple[str, str]] = {}
+        self._pr_tool_calls: dict[str, tuple[str, dict[str, Any]]] = {}
 
     async def run_turn(self, request: CreateResponseRequest, ctx: TurnContext) -> None:
         """Drive the inner executor for one turn, translating its events to Omnigent SSE.
@@ -205,11 +208,12 @@ class ExecutorAdapter(HarnessApp):
         clean_exit = False
         self._dispatched_call_ids.clear()
         self._observed_tool_calls.clear()
+        self._pr_tool_calls.clear()
 
         tracing = is_tracing_enabled()
         from omnigent.runtime.telemetry import current_session_id, session_scope
 
-        turn_session_id = current_session_id() or self._session_key
+        turn_session_id = ctx.session_id or current_session_id() or self._session_key
         if tracing and self._tracing_ctx is None:
             self._tracing_ctx = TracingContext(session_id=turn_session_id)
         tctx = self._tracing_ctx if tracing else None
@@ -312,6 +316,13 @@ class ExecutorAdapter(HarnessApp):
                                 error=event.message,
                             )
                             agent_span = None
+                        # Keep any usage the executor observed before the
+                        # failure: the scaffold's terminal-event builder reads
+                        # ctx.provider_usage, so the response.failed event still
+                        # carries context_tokens and the occupancy meter doesn't
+                        # freeze at the previous turn's value.
+                        if event.usage is not None:
+                            ctx.provider_usage = event.usage
                         # Guard: empty message surfaces as "inner executor error: " with no detail.
                         detail = event.message or "no detail reported (see runner/harness logs)"
                         raise RuntimeError(f"inner executor error: {detail}")
@@ -732,6 +743,7 @@ class ExecutorAdapter(HarnessApp):
             if tool_use_id is not None and event.metadata.get("internally_executed") is not True:
                 self._pending_mcp_call_ids.append(tool_use_id)
             call_id = tool_use_id or f"call_{uuid.uuid4().hex[:12]}"
+            self._pr_tool_calls[call_id] = (event.name, event.args or {})
             bare_name = _strip_mcp_tool_prefix(event.name)
             arguments_json = _serialize_args(event.args)
             if event.metadata.get("observed_call_completed") is True:
@@ -778,6 +790,21 @@ class ExecutorAdapter(HarnessApp):
             # is what prevents a duplicate card. This mirrors how a dispatched call
             # re-emits completed once its dispatch resolves.
             observed = self._observed_tool_calls.pop(call_id, None)
+            pr_call = self._pr_tool_calls.pop(call_id, None)
+            if pr_call is not None:
+                from omnigent.runner.pr_observer import observe_tool_completion
+
+                session_id = ctx.session_id
+                if session_id:
+                    observe_tool_completion(
+                        session_id,
+                        tool_name=pr_call[0],
+                        arguments=pr_call[1],
+                        result=event.result,
+                        successful=event.status == "success",
+                        call_id=call_id,
+                        source="sdk",
+                    )
             if observed is not None:
                 observed_name, observed_args = observed
                 ctx.emit(
