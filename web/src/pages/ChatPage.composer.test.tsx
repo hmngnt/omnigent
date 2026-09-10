@@ -12,6 +12,7 @@ import { useChatStore } from "@/store/chatStore";
 import { clearSessionDrafts, hasSessionDraft } from "@/lib/sessionDrafts";
 import { setOmnigentHostConfig } from "@/lib/host";
 import { COMPOSER_SEND_SHORTCUT_STORAGE_KEY } from "@/lib/composerSendShortcutPreferences";
+import { writeAlwaysSteer } from "@/lib/alwaysSteerPreferences";
 
 // Composer reads workspace files via a TanStack query hook (for "@"-file
 // mentions). These slash-command tests don't exercise that, so stub the hook
@@ -1904,7 +1905,21 @@ describe("Composer slash-command highlight overlay", () => {
 });
 
 describe("Composer placeholder", () => {
-  afterEach(cleanup);
+  const resetStore = () => {
+    writeAlwaysSteer(false);
+    useChatStore.setState({
+      conversationId: "conv_placeholder",
+      sessionStatus: "idle",
+      queuedMessages: [],
+    });
+  };
+
+  beforeEach(resetStore);
+
+  afterEach(() => {
+    cleanup();
+    resetStore();
+  });
 
   it("shows the normal placeholder when the runner is live", () => {
     render(<Composer {...composerProps({})} />);
@@ -1921,6 +1936,63 @@ describe("Composer placeholder", () => {
   it("streaming shows the queued follow-up placeholder", () => {
     render(<Composer {...composerProps({ status: "streaming" })} />);
     expect(textarea().placeholder).toMatch(/send a follow-up/i);
+  });
+
+  it("streaming shows the normal placeholder when always-steer sends directly", () => {
+    writeAlwaysSteer(true);
+    render(<Composer {...composerProps({ status: "streaming" })} />);
+    expect(textarea().placeholder).toMatch(/send a message/i);
+  });
+
+  it("shows the queued follow-up placeholder when this conversation has queued work", () => {
+    useChatStore.setState({
+      sessionStatus: "waiting",
+      queuedMessages: [
+        {
+          queueId: "queued_placeholder",
+          conversationId: "conv_placeholder",
+          text: "first follow-up",
+        },
+      ],
+    });
+
+    renderWithTooltips(<Composer {...composerProps()} />);
+    expect(textarea().placeholder).toMatch(/send a follow-up/i);
+  });
+
+  it("resets the native text input when the Send button moves focus first", () => {
+    const props = composerProps({ status: "streaming", isWorking: true });
+    render(<Composer {...props} />);
+    const ta = textarea();
+
+    ta.focus();
+    fireEvent.change(ta, { target: { value: "disabled" } });
+    fireEvent.blur(ta);
+    const focusSpy = vi.spyOn(ta, "focus");
+    const blurSpy = vi.spyOn(ta, "blur");
+    fireEvent.submit(ta.closest("form")!);
+
+    expect(props.onSend).toHaveBeenCalledWith("disabled", undefined);
+    expect(focusSpy).toHaveBeenCalledOnce();
+    expect(blurSpy).toHaveBeenCalledOnce();
+    expect(ta).toHaveValue("");
+    expect(ta).not.toHaveFocus();
+    expect(ta.placeholder).toMatch(/send a follow-up/i);
+  });
+
+  it("keeps the native input focused after a keyboard send", () => {
+    const props = composerProps({ status: "streaming", isWorking: true });
+    render(<Composer {...props} />);
+    const ta = textarea();
+
+    ta.focus();
+    fireEvent.change(ta, { target: { value: "disabled" } });
+    fireEvent.keyDown(ta, { key: "Enter" });
+
+    expect(props.onSend).toHaveBeenCalledWith("disabled", undefined);
+    expect(ta).toHaveValue("");
+    expect(ta).toHaveFocus();
+    expect(ta.placeholder).toMatch(/send a follow-up/i);
   });
 
   it("unreachable (host offline / local-stranded): composer is blocked", () => {

@@ -2604,8 +2604,6 @@ function ComposerImpl({
   // Highlight overlay mirroring the textarea; scroll-synced so the tinted
   // `/skill` token stays aligned once the draft grows past the visible rows.
   const backdropRef = useRef<HTMLDivElement>(null);
-  const isStreaming = status === "streaming";
-
   // Read-only when either the user lacks a write grant OR the session
   // is structurally non-interactive (``readOnlyReason``). The
   // structural reason takes priority for the placeholder text since it
@@ -2655,6 +2653,13 @@ function ComposerImpl({
   const conversationId = useChatStore((s) => s.conversationId);
   const queuedMessages = useChatStore((s) => s.queuedMessages);
   const sessionStatus = useChatStore((s) => s.sessionStatus);
+  const isQueuedFollowUp = shouldQueueSend(
+    conversationId,
+    status,
+    sessionStatus,
+    queuedMessages,
+    readAlwaysSteer(),
+  );
   const flushBoundAgentId = useChatStore((s) => s.boundAgentId);
   const maybeFlushQueuedHead = useChatStore((s) => s.maybeFlushQueuedHead);
   const dequeueMessage = useChatStore((s) => s.dequeueMessage);
@@ -3158,7 +3163,19 @@ function ComposerImpl({
     dirtyRef.current = true;
   };
 
-  const submit = () => {
+  const clearValueAfterSend = (fromSubmitButton: boolean) => {
+    const textarea = textareaRef.current;
+    if (fromSubmitButton && textarea !== null) {
+      // End the emptied text-input session so native keyboards drop predictions.
+      textarea.focus({ preventScroll: true });
+      textarea.value = "";
+      textarea.setSelectionRange(0, 0);
+      textarea.blur();
+    }
+    setValue("");
+  };
+
+  const submit = (fromSubmitButton = false) => {
     const trimmed = value.trim();
     // Allow send if there's text, attached files, OR "@"-tagged paths.
     if (
@@ -3258,7 +3275,7 @@ function ComposerImpl({
     if (trimmed) appendEntry(trimmed);
     onSend(messageText, files.length > 0 ? files : undefined);
     dirtyRef.current = true;
-    setValue("");
+    clearValueAfterSend(fromSubmitButton);
     setFiles([]);
     setAttachmentError(null);
     setMentionedItems([]);
@@ -3272,7 +3289,7 @@ function ComposerImpl({
       onStop();
       return;
     }
-    submit();
+    submit(true);
   };
 
   const applyRecall = (ta: HTMLTextAreaElement, recalled: string) => {
@@ -3620,7 +3637,7 @@ function ComposerImpl({
                       ? "Respond to the pending request above to continue"
                       : disabled
                         ? "Waiting for agents…"
-                        : isStreaming
+                        : isQueuedFollowUp
                           ? "Send a follow-up (queued) — Esc to stop"
                           : "Send a message…"
             }
