@@ -104,7 +104,7 @@ const SAME_AS_SOURCE = "__same__";
 // field), on both the trigger value and the open dropdown's options. Items set
 // their own `text-ui`, so the option font is shrunk via a descendant selector
 // on the dropdown content rather than plain inheritance.
-const FORK_SELECT_ITEM_SM = "[&_[data-slot=select-item]]:text-sm";
+const FORK_SELECT_ITEM_SM = "[&_[data-slot=command-item]]:text-sm";
 
 /**
  * Compact host label for the Select item — mirrors NewChatDialog's
