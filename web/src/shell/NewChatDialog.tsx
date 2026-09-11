@@ -64,7 +64,9 @@ import {
   MODEL_SELECT_SMART,
   ModelMenuSearch,
   defaultModelLabel,
+  deriveModelProviders,
   nativeModelLabel,
+  partitionModelOptionsByProvider,
   useModelMenuFilter,
 } from "@/components/HarnessConfigControls";
 import { ProjectLandingIcon } from "@/components/ProjectIconPicker";
@@ -72,6 +74,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuCheckboxItem,
+  DropdownMenuLabel,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuSub,
@@ -2631,6 +2634,7 @@ export function NewChatLandingScreen() {
         : (hostPiModelOptions ?? []).map((option) => ({
             id: option.id,
             displayName: option.displayName ?? option.id,
+            provider: option.provider,
             source: option.source,
           })),
     [hostPiModelOptions, sandboxSelected],
@@ -3586,24 +3590,47 @@ export function NewChatLandingScreen() {
                 Harness default
               </DropdownMenuCheckboxItem>
             )}
-          {modelFilter.filteredOptions.map((option) => (
-            <DropdownMenuCheckboxItem
-              key={option.id}
-              checked={
-                !routingOn &&
-                (pickedModel === option.id || (pickedModel === "" && option.isDefault === true))
-              }
-              onCheckedChange={() =>
-                selectPickerModel(option.isDefault ? MODEL_SELECT_DEFAULT : option.id)
-              }
-              onSelect={(event) => event.preventDefault()}
-              data-testid={`new-chat-landing-agent-model-${option.id}`}
-              title={nativeModelLabel(option)}
-              className="whitespace-normal break-words [&>span:last-child]:min-w-0"
-            >
-              {visibleModelLabel(nativeModelLabel(option))}
-            </DropdownMenuCheckboxItem>
-          ))}
+          {(() => {
+            // Group under provider labels only when the catalog spans
+            // providers; single-provider and provider-less catalogs keep
+            // the flat list.
+            const grouped =
+              deriveModelProviders(pickerModelOptions).length >= 2 &&
+              partitionModelOptionsByProvider(modelFilter.filteredOptions);
+            const renderItem = (option: (typeof pickerModelOptions)[number]) => (
+              <DropdownMenuCheckboxItem
+                key={option.id}
+                checked={
+                  !routingOn &&
+                  (pickedModel === option.id || (pickedModel === "" && option.isDefault === true))
+                }
+                onCheckedChange={() =>
+                  selectPickerModel(option.isDefault ? MODEL_SELECT_DEFAULT : option.id)
+                }
+                onSelect={(event) => event.preventDefault()}
+                data-testid={`new-chat-landing-agent-model-${option.id}`}
+                data-model-id={option.id}
+                title={nativeModelLabel(option)}
+                className="whitespace-normal break-words [&>span:last-child]:min-w-0"
+              >
+                {visibleModelLabel(nativeModelLabel(option))}
+              </DropdownMenuCheckboxItem>
+            );
+            if (!grouped) return modelFilter.filteredOptions.map(renderItem);
+            return grouped.map((section) => (
+              <div key={section.provider ?? "__no_provider__"}>
+                {section.provider && (
+                  <DropdownMenuLabel
+                    data-provider={section.provider}
+                    className="px-3 pt-1 text-[11px] font-normal text-muted-foreground/80"
+                  >
+                    {section.provider}
+                  </DropdownMenuLabel>
+                )}
+                {section.options.map(renderItem)}
+              </div>
+            ));
+          })()}
           {modelFilter.noResults && (
             <div className="px-2 py-1 text-xs text-muted-foreground">No models found</div>
           )}

@@ -365,6 +365,59 @@ export function ModelMenuSearch<T extends ModelMenuFilterOption>({
   return <Input ref={inputRef} type="search" className="mb-1 h-8 text-xs" {...inputProps} />;
 }
 
+/**
+ * Distinct provider ids carried by a model-option list, alphabetically.
+ *
+ * The provider comes from the payload's explicit ``provider`` field — never
+ * derived by splitting qualified ids (``openrouter/z-ai/glm-5.3:batch`` is
+ * ambiguous). Options without the field contribute nothing.
+ */
+export function deriveModelProviders<T extends { provider?: string }>(
+  options: readonly T[],
+): string[] {
+  const providers = new Set<string>();
+  for (const option of options) {
+    if (option.provider) providers.add(option.provider);
+  }
+  return Array.from(providers).sort();
+}
+
+/** One provider-labeled section of a model menu (null = no provider field). */
+export interface ModelMenuSection<T> {
+  provider: string | null;
+  options: readonly T[];
+}
+
+/**
+ * Partition model options into provider sections for menu rendering.
+ *
+ * Providers appear alphabetically; options without a ``provider`` field land
+ * in a trailing unlabeled section (never dropped — they are listed exactly
+ * as a flat menu would list them). When fewer than two distinct providers
+ * are present the caller should keep the flat list; the sections this
+ * returns then reduce to one and no labels are needed.
+ */
+export function partitionModelOptionsByProvider<T extends { provider?: string }>(
+  options: readonly T[],
+): ModelMenuSection<T>[] {
+  const byProvider = new Map<string, T[]>();
+  const unprovidered: T[] = [];
+  for (const option of options) {
+    if (option.provider) {
+      const bucket = byProvider.get(option.provider);
+      if (bucket) bucket.push(option);
+      else byProvider.set(option.provider, [option]);
+    } else {
+      unprovidered.push(option);
+    }
+  }
+  const sections: ModelMenuSection<T>[] = Array.from(byProvider.keys())
+    .sort()
+    .map((provider) => ({ provider, options: byProvider.get(provider)! }));
+  if (unprovidered.length > 0) sections.push({ provider: null, options: unprovidered });
+  return sections;
+}
+
 // Claude-native reasoning-effort options for the new-session / scheduled-task
 // model+effort pickers. There is deliberately no hardcoded effort default: an
 // unselected picker omits `reasoning_effort`, so Claude Code falls back to its

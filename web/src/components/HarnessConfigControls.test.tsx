@@ -5,10 +5,12 @@ import { SMART_ROUTING_LABEL } from "@/lib/agentLabels";
 
 import {
   MODEL_MENU_SEARCH_THRESHOLD,
+  deriveModelProviders,
   MODEL_SELECT_DEFAULT,
   MODEL_SELECT_SMART,
   ModelMenuSearch,
   RoutingModelSelect,
+  partitionModelOptionsByProvider,
   useModelMenuFilter,
 } from "./HarnessConfigControls";
 
@@ -401,5 +403,46 @@ describe("useModelMenuFilter / ModelMenuSearch", () => {
       code: "ArrowDown",
     });
     expect(parentKeyDown).not.toHaveBeenCalled();
+  });
+});
+
+describe("deriveModelProviders / partitionModelOptionsByProvider", () => {
+  const mixed = [
+    { id: "zai/glm-5.3", provider: "zai" },
+    { id: "moonshotai/kimi-k3", provider: "moonshotai" },
+    { id: "zai/glm-5.3-flash", provider: "zai" },
+    { id: "bare-model", provider: undefined },
+  ];
+
+  it("derives distinct providers alphabetically, ignoring provider-less options", () => {
+    expect(deriveModelProviders(mixed)).toEqual(["moonshotai", "zai"]);
+    const providerless: { id: string; provider?: string }[] = [{ id: "a" }, { id: "b" }];
+    expect(deriveModelProviders(providerless)).toEqual([]);
+  });
+
+  it("partitions alphabetically with the provider-less section last and never dropped", () => {
+    const sections = partitionModelOptionsByProvider(mixed);
+    expect(sections.map((section) => section.provider)).toEqual(["moonshotai", "zai", null]);
+    expect(sections[1].options.map((option) => option.id)).toEqual([
+      "zai/glm-5.3",
+      "zai/glm-5.3-flash",
+    ]);
+    expect(sections[2].options.map((option) => option.id)).toEqual(["bare-model"]);
+  });
+
+  it("reduces to a single unlabeled section for single-provider catalogs", () => {
+    const sections = partitionModelOptionsByProvider([
+      { id: "a", provider: "zai" },
+      { id: "b", provider: "zai" },
+    ]);
+    expect(sections).toEqual([
+      {
+        provider: "zai",
+        options: [
+          { id: "a", provider: "zai" },
+          { id: "b", provider: "zai" },
+        ],
+      },
+    ]);
   });
 });

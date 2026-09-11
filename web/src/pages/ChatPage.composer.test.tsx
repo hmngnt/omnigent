@@ -3230,6 +3230,90 @@ describe("Composer config gear", () => {
         expect(setModel).toHaveBeenCalledWith("alpha", { expectConfirmation: true }),
       );
     });
+
+    it("groups models under provider labels when the catalog spans providers", async () => {
+      const options = [
+        { id: "zai/glm-5.3", displayName: "GLM 5.3", provider: "zai" },
+        { id: "moonshotai/kimi-k3", displayName: "Kimi K3", provider: "moonshotai" },
+        ...Array.from({ length: 15 }, (_, i) => ({
+          id: `zai/filler-${i}`,
+          displayName: `Filler ${i}`,
+          provider: "zai",
+        })),
+      ];
+      renderWithTooltips(
+        <Composer
+          {...composerProps({
+            showModels: true,
+            modelPickerKind: "pi",
+            codexModelOptions: options,
+          })}
+        />,
+      );
+      await openSessionModels();
+
+      const labels = screen.getAllByTestId(/composer-agent-models/).length; // section exists
+      expect(screen.getByTestId("composer-agent-models")).toBeTruthy();
+      const providerLabels = document.querySelectorAll("[data-provider]");
+      expect(providerLabels.length).toBe(2);
+      expect(providerLabels[0]).toHaveTextContent("moonshotai");
+      expect(providerLabels[1]).toHaveTextContent("zai");
+      // Provider-labeled items keep their interaction contracts.
+      fireEvent.click(screen.getByTestId("composer-agent-model-zai/glm-5.3"));
+      expect(labels).toBeGreaterThan(0);
+    });
+
+    it("keeps the list flat when options carry no or one provider", async () => {
+      const options = [
+        { id: "alpha", displayName: "Alpha One" },
+        ...Array.from({ length: 15 }, (_, i) => ({
+          id: `model-${i}`,
+          displayName: `Model ${i}`,
+        })),
+      ];
+      renderWithTooltips(
+        <Composer
+          {...composerProps({
+            showModels: true,
+            modelPickerKind: "claude",
+            codexModelOptions: options,
+          })}
+        />,
+      );
+      await openSessionModels();
+      expect(document.querySelectorAll("[data-provider]").length).toBe(0);
+      expect(screen.getByTestId("composer-agent-model-alpha")).toBeTruthy();
+    });
+
+    it("hides a provider group emptied by the search filter", async () => {
+      const options = [
+        { id: "zai/glm-5.3", displayName: "GLM 5.3", provider: "zai" },
+        { id: "moonshotai/kimi-k3", displayName: "Kimi K3", provider: "moonshotai" },
+        ...Array.from({ length: 15 }, (_, i) => ({
+          id: `zai/filler-${i}`,
+          displayName: `Filler ${i}`,
+          provider: "zai",
+        })),
+      ];
+      renderWithTooltips(
+        <Composer
+          {...composerProps({
+            showModels: true,
+            modelPickerKind: "pi",
+            codexModelOptions: options,
+          })}
+        />,
+      );
+      await openSessionModels();
+      fireEvent.change(screen.getByTestId("composer-agent-models-search"), {
+        target: { value: "kimi" },
+      });
+      const providerLabels = document.querySelectorAll("[data-provider]");
+      expect(providerLabels.length).toBe(1);
+      expect(providerLabels[0]).toHaveTextContent("moonshotai");
+      expect(screen.getByTestId("composer-agent-model-moonshotai/kimi-k3")).toBeTruthy();
+      expect(screen.queryByTestId("composer-agent-model-zai/glm-5.3")).toBeNull();
+    });
   });
 });
 
