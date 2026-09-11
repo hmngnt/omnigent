@@ -17,7 +17,10 @@ import {
   COMPOSER_HARNESS_MENU_SIZE,
   PickerSectionHeader,
 } from "@/components/composer/HarnessMenuRow";
-import { ComposerConfigSections } from "@/components/composer/ComposerConfigSections";
+import {
+  ComposerConfigSections,
+  providerGroupedChoices,
+} from "@/components/composer/ComposerConfigSections";
 import { compactModelTriggerLabel, normalizeEffortLabel } from "@/lib/composerModelLabel";
 import {
   codexCreateApprovalOptions,
@@ -77,7 +80,9 @@ import {
   MODEL_SELECT_SMART,
   ModelMenuSearch,
   defaultModelLabel,
+  deriveModelProviders,
   nativeModelLabel,
+  partitionModelOptionsByProvider,
   useModelMenuFilter,
 } from "@/components/HarnessConfigControls";
 import { ProjectLandingIcon } from "@/components/ProjectIconPicker";
@@ -85,6 +90,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuCheckboxItem,
+  DropdownMenuLabel,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuSub,
@@ -2441,6 +2447,7 @@ export function NewChatLandingScreen() {
             id: option.id,
             model: option.model,
             displayName: nativeModelLabel(option),
+            provider: option.provider,
             source: option.source,
           })),
     [availablePiModels, sandboxSelected],
@@ -3498,19 +3505,23 @@ export function NewChatLandingScreen() {
                           },
                         ]
                       : []),
-                    ...modelFilter.filteredOptions.map((option) => ({
-                      key: option.id,
-                      label: visibleModelLabel(nativeModelLabel(option)),
-                      checked:
-                        !routingOn &&
-                        (pickedModel === option.id ||
-                          (pickedModel === "" && option.isDefault === true)),
-                      onSelect: () =>
-                        selectPickerModel(option.isDefault ? MODEL_SELECT_DEFAULT : option.id),
-                      testId: `new-chat-landing-agent-model-${option.id}`,
-                      title: nativeModelLabel(option),
-                      className: "whitespace-normal break-words [&>span:last-child]:min-w-0",
-                    })),
+                    ...providerGroupedChoices(
+                      modelFilter.filteredOptions,
+                      pickerModelOptions,
+                      (option) => ({
+                        key: option.id,
+                        label: visibleModelLabel(nativeModelLabel(option)),
+                        checked:
+                          !routingOn &&
+                          (pickedModel === option.id ||
+                            (pickedModel === "" && option.isDefault === true)),
+                        onSelect: () =>
+                          selectPickerModel(option.isDefault ? MODEL_SELECT_DEFAULT : option.id),
+                        testId: `new-chat-landing-agent-model-${option.id}`,
+                        title: nativeModelLabel(option),
+                        className: "whitespace-normal break-words [&>span:last-child]:min-w-0",
+                      }),
+                    ),
                   ],
                 }
               : undefined

@@ -203,7 +203,10 @@ import {
 } from "@/lib/smartRoutingAvailability";
 import { useHostModelOptions, useHosts } from "@/hooks/useHosts";
 import { PickerSectionHeader } from "@/components/composer/HarnessMenuRow";
-import { ComposerConfigSections } from "@/components/composer/ComposerConfigSections";
+import {
+  ComposerConfigSections,
+  providerGroupedChoices,
+} from "@/components/composer/ComposerConfigSections";
 import { ComposerWorkspaceStatus } from "@/components/composer/ComposerWorkspaceStatus";
 import { ComposerPrLink } from "@/components/composer/ComposerPrLink";
 import { ComposerContextRing } from "@/components/composer/ComposerContextRing";
@@ -4451,7 +4454,7 @@ function SessionHarnessPicker({
                       },
                     ]
                   : []),
-                ...modelFilter.filteredOptions.map((model) => ({
+                ...providerGroupedChoices(modelFilter.filteredOptions, modelOptions, (model) => ({
                   key: model.id,
                   label: nativeModelLabel(model),
                   checked:
@@ -4699,6 +4702,7 @@ function useResolvedComposerModel(
     label?: string;
     displayName?: string;
     isDefault?: boolean;
+    provider?: string;
   }[] = usesServerModelOptions ? codexModelOptions : [];
   const isNativeModelPicker = modelPickerKind !== null;
 
