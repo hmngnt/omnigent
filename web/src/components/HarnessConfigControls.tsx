@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { DropdownMenuLabel } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Command, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -416,6 +417,51 @@ export function partitionModelOptionsByProvider<T extends { provider?: string }>
     .map((provider) => ({ provider, options: byProvider.get(provider)! }));
   if (unprovidered.length > 0) sections.push({ provider: null, options: unprovidered });
   return sections;
+}
+
+/**
+ * Render a (search-filtered) model list for a DropdownMenu, flat or grouped
+ * under provider labels.
+ *
+ * Grouping gates on the FULL catalog's provider count (stable while search
+ * filters) but partitions the filtered list, so a group the query empties
+ * hides its label and a filtered single-group view still reads correctly.
+ * Fewer than two distinct providers — including catalogs whose options carry
+ * no provider field — render the flat list, exactly as before the field
+ * existed. Options are never dropped; provider-less ones trail unlabeled.
+ *
+ * Shared by the composer agent-config menus so the two implementations
+ * cannot drift.
+ */
+export function ModelMenuSections<T extends { id: string; provider?: string }>({
+  options,
+  allOptions,
+  renderItem,
+}: {
+  options: readonly T[];
+  allOptions: readonly T[];
+  renderItem: (option: T) => ReactNode;
+}): ReactNode {
+  const grouped =
+    deriveModelProviders(allOptions).length >= 2 && partitionModelOptionsByProvider(options);
+  if (!grouped) return <>{options.map(renderItem)}</>;
+  return (
+    <>
+      {grouped.map((section) => (
+        <div key={section.provider ?? "__no_provider__"}>
+          {section.provider && (
+            <DropdownMenuLabel
+              data-provider={section.provider}
+              className="px-3 pt-1 text-[11px] font-normal text-muted-foreground/80"
+            >
+              {section.provider}
+            </DropdownMenuLabel>
+          )}
+          {section.options.map(renderItem)}
+        </div>
+      ))}
+    </>
+  );
 }
 
 // Claude-native reasoning-effort options for the new-session / scheduled-task

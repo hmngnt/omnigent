@@ -217,9 +217,8 @@ import {
 import {
   ConfigRow,
   ModelMenuSearch,
-  deriveModelProviders,
+  ModelMenuSections,
   nativeModelLabel,
-  partitionModelOptionsByProvider,
   useModelMenuFilter,
 } from "@/components/HarnessConfigControls";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
@@ -4833,14 +4832,10 @@ function SessionHarnessPicker({
               Default
             </DropdownMenuCheckboxItem>
           )}
-          {(() => {
-            // Group under provider labels only when the catalog actually
-            // spans providers; single-provider and provider-less catalogs
-            // (claude/codex native) keep the flat list.
-            const grouped =
-              deriveModelProviders(modelOptions).length >= 2 &&
-              partitionModelOptionsByProvider(modelFilter.filteredOptions);
-            const renderItem = (model: (typeof modelOptions)[number]) => (
+          <ModelMenuSections
+            options={modelFilter.filteredOptions}
+            allOptions={modelOptions}
+            renderItem={(model) => (
               <DropdownMenuCheckboxItem
                 key={model.id}
                 disabled={busy || pendingModelChange !== null}
@@ -4857,22 +4852,8 @@ function SessionHarnessPicker({
               >
                 {nativeModelLabel(model)}
               </DropdownMenuCheckboxItem>
-            );
-            if (!grouped) return modelFilter.filteredOptions.map(renderItem);
-            return grouped.map((section) => (
-              <div key={section.provider ?? "__no_provider__"}>
-                {section.provider && (
-                  <DropdownMenuLabel
-                    data-provider={section.provider}
-                    className="px-3 pt-1 text-[11px] font-normal text-muted-foreground/80"
-                  >
-                    {section.provider}
-                  </DropdownMenuLabel>
-                )}
-                {section.options.map(renderItem)}
-              </div>
-            ));
-          })()}
+            )}
+          />
           {modelFilter.noResults && (
             <div className="px-2 py-1 text-xs text-muted-foreground">No models found</div>
           )}

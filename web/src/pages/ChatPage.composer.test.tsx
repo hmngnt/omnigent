@@ -3252,7 +3252,6 @@ describe("Composer config gear", () => {
       );
       await openSessionModels();
 
-      const labels = screen.getAllByTestId(/composer-agent-models/).length; // section exists
       expect(screen.getByTestId("composer-agent-models")).toBeTruthy();
       const providerLabels = document.querySelectorAll("[data-provider]");
       expect(providerLabels.length).toBe(2);
@@ -3260,7 +3259,26 @@ describe("Composer config gear", () => {
       expect(providerLabels[1]).toHaveTextContent("zai");
       // Provider-labeled items keep their interaction contracts.
       fireEvent.click(screen.getByTestId("composer-agent-model-zai/glm-5.3"));
-      expect(labels).toBeGreaterThan(0);
+    });
+
+    it("keeps the list flat when every option carries the same provider", async () => {
+      const options = Array.from({ length: 16 }, (_, i) => ({
+        id: `zai/model-${i}`,
+        displayName: `Model ${i}`,
+        provider: "zai",
+      }));
+      renderWithTooltips(
+        <Composer
+          {...composerProps({
+            showModels: true,
+            modelPickerKind: "pi",
+            codexModelOptions: options,
+          })}
+        />,
+      );
+      await openSessionModels();
+      expect(screen.getByTestId("composer-agent-model-zai/model-0")).toBeTruthy();
+      expect(document.querySelectorAll("[data-provider]").length).toBe(0);
     });
 
     it("keeps the list flat when options carry no or one provider", async () => {
