@@ -1,5 +1,14 @@
 import { type ReactNode, useState } from "react";
 
+import { Button } from "@/components/ui/button";
+import {
+  Command,
+  CommandEmpty,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -9,7 +18,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { SMART_ROUTING_LABEL } from "@/lib/agentLabels";
+import { useOmnigentAnalytics } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
+import { ChevronDownIcon } from "lucide-react";
 
 // Sentinel Select values for the Model row. Radix requires a non-empty value,
 // so the two "no explicit model" choices ride on reserved tokens rather than
@@ -58,10 +69,12 @@ export function defaultModelLabel(options: readonly NativeModelLabelFields[]): s
 }
 
 /**
- * The Model row's Select: the Smart Routing sentinel (when offered), the
- * harness's own "Default", then the harness's models. Shared by the landing
- * dialog and the in-session composer so the sentinels and their copy can't
- * drift across the three places the row appears.
+ * The Model row's searchable picker: the Smart Routing sentinel (when offered),
+ * the harness's own "Default", then the harness's models. Uses the same
+ * Popover + cmdk pattern as the landing pi picker so long catalogs are
+ * searchable, while short catalogs fall back to a plain list. Shared by the
+ * landing dialog and the in-session composer so the sentinels and their copy
+ * can't drift across the three places the row appears.
  *
  * @param value Selected value — a model id or one of the sentinels.
  * @param onValueChange Selection callback.
@@ -110,38 +123,102 @@ export function RoutingModelSelect({
   componentId?: string;
   children?: ReactNode;
 }) {
+  const { trackValueChange } = useOmnigentAnalytics();
+  const [open, setOpen] = useState(false);
+  const modelList = models ?? [];
+
+  const selectedLabel =
+    value === MODEL_SELECT_SMART
+      ? SMART_ROUTING_LABEL
+      : value === MODEL_SELECT_DEFAULT
+        ? defaultLabel
+        : (modelList.find((m) => m.id === value)?.label ?? value);
+
+  const select = (nextValue: string) => {
+    if (componentId) {
+      // valueHasNoPii assumes a bounded catalog; drop it if reused for typed values.
+      trackValueChange(componentId, "select", nextValue, { valueHasNoPii: true });
+    }
+    onValueChange(nextValue);
+    setOpen(false);
+  };
+
+  // Show the search box only for long catalogs. Claude/codex ship ~5-10
+  // models, where a plain list is faster; pi exposes ~90 models and needs
+  // filtering.
+  const showSearch = modelList.length > 15;
+
   return (
-    // valueHasNoPii assumes a bounded catalog; drop it if reused for typed values.
-    <Select value={value} onValueChange={onValueChange} componentId={componentId} valueHasNoPii>
-      <SelectTrigger
-        className={cn("w-full", triggerClassName)}
-        data-testid={testId}
-        aria-label={ariaLabel}
-      >
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent
-        position="popper"
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          role="combobox"
+          aria-expanded={open}
+          aria-label={ariaLabel}
+          data-testid={testId}
+          className={cn("h-8 w-full justify-between gap-2 px-2.5 font-normal", triggerClassName)}
+        >
+          <span className="min-w-0 truncate">{selectedLabel}</span>
+          <ChevronDownIcon className="size-4 shrink-0 text-muted-foreground" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
         align="start"
-        className={cn("w-max min-w-(--radix-select-trigger-width) max-w-[300px]", contentClassName)}
-      >
-        {offerSmartRouting && (
-          <SelectItem value={MODEL_SELECT_SMART}>{SMART_ROUTING_LABEL}</SelectItem>
+        className={cn(
+          "max-h-[var(--radix-popover-content-available-height)] w-[var(--radix-popover-trigger-width)] min-w-0 overflow-hidden p-0",
+          contentClassName,
         )}
-        <SelectItem value={MODEL_SELECT_DEFAULT}>{defaultLabel}</SelectItem>
-        {(models ?? []).map((m) => (
-          <SelectItem
-            key={m.id}
-            value={m.id}
-            data-model-id={m.id}
-            data-active={activeModelId === m.id ? "true" : undefined}
+      >
+        <Command className="h-auto min-h-0">
+          {showSearch && (
+            <CommandInput placeholder="Search models…" data-testid={`${testId}-search`} />
+          )}
+          <CommandList
+            className="max-h-72 min-h-0 overflow-y-auto overscroll-contain"
+            onWheel={(event) => event.stopPropagation()}
           >
-            {m.label}
-          </SelectItem>
-        ))}
-        {children}
-      </SelectContent>
-    </Select>
+            {offerSmartRouting && (
+              <CommandItem
+                value={MODEL_SELECT_SMART}
+                keywords={[SMART_ROUTING_LABEL]}
+                data-checked={value === MODEL_SELECT_SMART ? "true" : undefined}
+                forceMount
+                onSelect={() => select(MODEL_SELECT_SMART)}
+              >
+                <span className="min-w-0 truncate">{SMART_ROUTING_LABEL}</span>
+              </CommandItem>
+            )}
+            <CommandItem
+              value={MODEL_SELECT_DEFAULT}
+              keywords={[defaultLabel]}
+              data-checked={value === MODEL_SELECT_DEFAULT ? "true" : undefined}
+              forceMount
+              onSelect={() => select(MODEL_SELECT_DEFAULT)}
+            >
+              <span className="min-w-0 truncate">{defaultLabel}</span>
+            </CommandItem>
+            {modelList.map((m) => (
+              <CommandItem
+                key={m.id}
+                value={m.id}
+                keywords={[m.label]}
+                title={m.label}
+                data-model-id={m.id}
+                data-active={activeModelId === m.id ? "true" : undefined}
+                data-checked={value === m.id ? "true" : undefined}
+                onSelect={() => select(m.id)}
+              >
+                <span className="min-w-0 truncate">{m.label}</span>
+              </CommandItem>
+            ))}
+            <CommandEmpty>No models found</CommandEmpty>
+            {children}
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
   );
 }
 
