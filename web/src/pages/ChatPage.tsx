@@ -214,7 +214,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ConfigRow, nativeModelLabel } from "@/components/HarnessConfigControls";
+import {
+  ConfigRow,
+  ModelMenuSearch,
+  nativeModelLabel,
+  useModelMenuFilter,
+} from "@/components/HarnessConfigControls";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
 import { MainTerminalView } from "@/shell/MainTerminalView";
@@ -4800,6 +4805,7 @@ function SessionHarnessPicker({
       )
         await store.setCostControlMode("off");
     });
+  const modelFilter = useModelMenuFilter(modelOptions);
   const configContent = (
     <>
       {showModels && (
@@ -4807,6 +4813,7 @@ function SessionHarnessPicker({
           <DropdownMenuLabel className="px-2 text-xs font-normal text-muted-foreground">
             Models
           </DropdownMenuLabel>
+          {modelFilter.showSearch && <ModelMenuSearch filter={modelFilter} />}
           {!modelOptions.some((model) => model.isDefault) && (
             <DropdownMenuCheckboxItem
               checked={!routingOn && pickerSelectedModel === null}
@@ -4818,7 +4825,7 @@ function SessionHarnessPicker({
               Default
             </DropdownMenuCheckboxItem>
           )}
-          {modelOptions.map((model) => (
+          {modelFilter.filteredOptions.map((model) => (
             <DropdownMenuCheckboxItem
               key={model.id}
               disabled={busy || pendingModelChange !== null}
@@ -4836,6 +4843,9 @@ function SessionHarnessPicker({
               {nativeModelLabel(model)}
             </DropdownMenuCheckboxItem>
           ))}
+          {modelFilter.noResults && (
+            <div className="px-2 py-1 text-xs text-muted-foreground">No models found</div>
+          )}
           {pickerSelectedModel &&
             !modelOptions.some((model) => model.id === pickerSelectedModel) && (
               <DropdownMenuCheckboxItem
@@ -4922,6 +4932,12 @@ function SessionHarnessPicker({
           onPointerMoveCapture={(event) => {
             if (configMenuOpen && event.currentTarget.contains(event.target as Node))
               event.preventDefault();
+          }}
+          onOpenAutoFocus={(event) => {
+            if (modelFilter.showSearch && modelFilter.inputRef.current) {
+              event.preventDefault();
+              modelFilter.focusInput();
+            }
           }}
         >
           {isMobile && configMenuOpen ? (

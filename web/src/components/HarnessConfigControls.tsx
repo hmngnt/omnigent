@@ -1,6 +1,7 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Command,
   CommandEmpty,
@@ -33,6 +34,10 @@ export const EFFORT_SELECT_NONE = "__none__";
 // Shown in the frozen Effort row when the router picks the model per turn, so
 // no effort can apply. Rendered as the Select's placeholder (value "").
 export const EFFORT_UNAVAILABLE_PLACEHOLDER = "—";
+
+// Catalog length above which the composer agent-config model menus show a
+// search field. Kept in sync with RoutingModelSelect below.
+export const MODEL_MENU_SEARCH_THRESHOLD = 15;
 
 /** One entry in the Model row's harness-model list. */
 export interface RoutingModelOption {
@@ -146,7 +151,7 @@ export function RoutingModelSelect({
   // Show the search box only for long catalogs. Claude/codex ship ~5-10
   // models, where a plain list is faster; pi exposes ~90 models and needs
   // filtering.
-  const showSearch = modelList.length > 15;
+  const showSearch = modelList.length > MODEL_MENU_SEARCH_THRESHOLD;
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -220,6 +225,101 @@ export function RoutingModelSelect({
       </PopoverContent>
     </Popover>
   );
+}
+
+/** One option in a DropdownMenu-based model catalog (composer config menus). */
+export interface ModelMenuFilterOption {
+  id: string;
+  displayName?: string;
+  label?: string;
+}
+
+/** Return value of {@link useModelMenuFilter}. */
+export interface UseModelMenuFilterResult<T extends ModelMenuFilterOption> {
+  query: string;
+  setQuery: (query: string) => void;
+  showSearch: boolean;
+  filteredOptions: readonly T[];
+  noResults: boolean;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  inputProps: Omit<React.ComponentProps<"input">, "ref" | "type"> & {
+    "data-testid": "composer-agent-models-search";
+    placeholder: "Search models…";
+    "aria-label": "Search models";
+    value: string;
+    onChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
+    onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => void;
+  };
+  focusInput: () => void;
+}
+
+/**
+ * Filter state for a DropdownMenu model list. Shows a search field only for
+ * long catalogs (> MODEL_MENU_SEARCH_THRESHOLD); the query is split on
+ * whitespace and every term must match the option's display label or id —
+ * the same semantics as the pre-launch agent menu's pi search.
+ */
+export function useModelMenuFilter<T extends ModelMenuFilterOption>(
+  options: readonly T[],
+): UseModelMenuFilterResult<T> {
+  const [query, setQuery] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+
+  const filteredOptions = useMemo(() => {
+    if (terms.length === 0) return options;
+    return options.filter((option) => {
+      const label = (option.displayName ?? option.label ?? option.id).toLowerCase();
+      return terms.every((term) => label.includes(term) || option.id.toLowerCase().includes(term));
+    });
+  }, [options, terms]);
+
+  const showSearch = options.length > MODEL_MENU_SEARCH_THRESHOLD;
+  const noResults = showSearch && terms.length > 0 && filteredOptions.length === 0;
+
+  const focusInput = useCallback(() => {
+    // Defer so the input is present in the DOM when Radix fires onOpenAutoFocus.
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
+
+  const inputProps = useMemo(
+    () => ({
+      "data-testid": "composer-agent-models-search" as const,
+      placeholder: "Search models…" as const,
+      "aria-label": "Search models" as const,
+      value: query,
+      onChange: (event: React.ChangeEvent<HTMLInputElement>) => setQuery(event.target.value),
+      onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => event.stopPropagation(),
+    }),
+    [query],
+  );
+
+  return {
+    query,
+    setQuery,
+    showSearch,
+    filteredOptions,
+    noResults,
+    inputRef,
+    inputProps,
+    focusInput,
+  };
+}
+
+/** Search input rendered at the top of a model menu. */
+export function ModelMenuSearch<T extends ModelMenuFilterOption>({
+  filter,
+}: {
+  filter: UseModelMenuFilterResult<T>;
+}): ReactNode {
+  const { inputRef, inputProps, focusInput, showSearch } = filter;
+
+  useEffect(() => {
+    if (showSearch) focusInput();
+  }, [showSearch, focusInput]);
+
+  return <Input ref={inputRef} type="search" className="mb-1 h-8 text-xs" {...inputProps} />;
 }
 
 // Claude-native reasoning-effort options for the new-session / scheduled-task
