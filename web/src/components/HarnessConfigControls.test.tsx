@@ -197,6 +197,24 @@ describe("RoutingModelSelect", () => {
     expect(screen.getByRole("option", { name: "Default" })).toBeTruthy();
   });
 
+  it("renders caller notes alone on an empty catalog, with no phantom empty state", () => {
+    render(
+      <RoutingModelSelect
+        value={MODEL_SELECT_DEFAULT}
+        onValueChange={vi.fn()}
+        offerSmartRouting={false}
+        testId="model-picker"
+        models={[]}
+      >
+        <div className="px-2.5 py-1 text-sm text-muted-foreground">Loading models…</div>
+      </RoutingModelSelect>,
+    );
+
+    openPicker();
+    expect(screen.getByText("Loading models…")).toBeTruthy();
+    expect(screen.queryByText("No models found")).toBeNull();
+  });
+
   it("shows an empty state when the search matches nothing", () => {
     const longModels = Array.from({ length: 20 }, (_, i) => ({
       id: `model-${i}`,

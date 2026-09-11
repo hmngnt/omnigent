@@ -4806,6 +4806,12 @@ function SessionHarnessPicker({
         await store.setCostControlMode("off");
     });
   const modelFilter = useModelMenuFilter(modelOptions);
+  // Reset the search when the menu closes: the picker survives warm
+  // conversation switches, and a filter left over from the last open would
+  // silently pre-filter the next conversation's catalog.
+  useEffect(() => {
+    if (!menuOpen) modelFilter.setQuery("");
+  }, [menuOpen, modelFilter]);
   const configContent = (
     <>
       {showModels && (
@@ -4932,12 +4938,6 @@ function SessionHarnessPicker({
           onPointerMoveCapture={(event) => {
             if (configMenuOpen && event.currentTarget.contains(event.target as Node))
               event.preventDefault();
-          }}
-          onOpenAutoFocus={(event) => {
-            if (modelFilter.showSearch && modelFilter.inputRef.current) {
-              event.preventDefault();
-              modelFilter.focusInput();
-            }
           }}
         >
           {isMobile && configMenuOpen ? (
