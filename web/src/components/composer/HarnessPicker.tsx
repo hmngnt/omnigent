@@ -33,7 +33,6 @@ export function HarnessPicker({
   contentAlign = "end",
   testId,
   configOpen = false,
-  onContentOpenAutoFocus,
   children,
 }: {
   open: boolean;
@@ -46,9 +45,6 @@ export function HarnessPicker({
   contentAlign?: "start" | "center" | "end";
   testId?: string;
   configOpen?: boolean;
-  // Forwarded to the content's Radix onOpenAutoFocus — e.g. to keep the menu
-  // from stealing focus from a model search box mounted inside it.
-  onContentOpenAutoFocus?: (event: Event) => void;
   children: ReactNode;
 }) {
   const guardedTooltip = useMenuGuardedTooltip(open);
@@ -96,7 +92,6 @@ export function HarnessPicker({
           if (configOpen && event.currentTarget.contains(event.target as Node))
             event.preventDefault();
         }}
-        onOpenAutoFocus={onContentOpenAutoFocus}
       >
         {children}
       </DropdownMenuContent>
