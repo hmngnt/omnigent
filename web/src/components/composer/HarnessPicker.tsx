@@ -33,6 +33,7 @@ export function HarnessPicker({
   contentAlign = "end",
   testId,
   configOpen = false,
+  onContentOpenAutoFocus,
   children,
 }: {
   open: boolean;
@@ -45,6 +46,9 @@ export function HarnessPicker({
   contentAlign?: "start" | "center" | "end";
   testId?: string;
   configOpen?: boolean;
+  // Forwarded to the content's Radix onOpenAutoFocus — e.g. to keep the menu
+  // from stealing focus from a model search box mounted inside it.
+  onContentOpenAutoFocus?: (event: Event) => void;
   children: ReactNode;
 }) {
   const guardedTooltip = useMenuGuardedTooltip(open);
@@ -92,6 +96,7 @@ export function HarnessPicker({
           if (configOpen && event.currentTarget.contains(event.target as Node))
             event.preventDefault();
         }}
+        onOpenAutoFocus={onContentOpenAutoFocus}
       >
         {children}
       </DropdownMenuContent>
@@ -104,6 +109,7 @@ export function HarnessPickerEntry({
   onOpenChange,
   onSelect,
   configContent,
+  onConfigOpenAutoFocus,
   editable = true,
   isMobile = false,
   disabled,
@@ -115,6 +121,9 @@ export function HarnessPickerEntry({
   onOpenChange: (open: boolean) => void;
   onSelect?: () => void;
   configContent?: ReactNode;
+  // Forwarded to the config sub-content's Radix onOpenAutoFocus — e.g. to
+  // focus a model search box mounted inside the config menu.
+  onConfigOpenAutoFocus?: (event: Event) => void;
   disabled?: boolean;
   testId?: string;
   configTestId?: string;
@@ -154,6 +163,7 @@ export function HarnessPickerEntry({
             if (event.target instanceof Element && event.target.getAttribute("role") === "menu")
               event.preventDefault();
           }}
+          onOpenAutoFocus={onConfigOpenAutoFocus}
         >
           {configContent}
         </DropdownMenuSubContent>

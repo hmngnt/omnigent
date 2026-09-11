@@ -1,12 +1,15 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { SMART_ROUTING_LABEL } from "@/lib/agentLabels";
 
 import {
+  MODEL_MENU_SEARCH_THRESHOLD,
   MODEL_SELECT_DEFAULT,
   MODEL_SELECT_SMART,
+  ModelMenuSearch,
   RoutingModelSelect,
+  useModelMenuFilter,
 } from "./HarnessConfigControls";
 
 const MODELS = [
@@ -216,5 +219,169 @@ describe("RoutingModelSelect", () => {
     });
 
     expect(screen.getByText("No models found")).toBeTruthy();
+  });
+});
+
+/** Renders the menu filter hook through a minimal list, like a menu would. */
+function FilterHarness({
+  options,
+}: {
+  options: { id: string; displayName?: string; label?: string }[];
+}) {
+  const filter = useModelMenuFilter(options);
+  return (
+    <div>
+      {filter.showSearch && <ModelMenuSearch filter={filter} />}
+      <ul>
+        {filter.filteredOptions.map((option) => (
+          <li key={option.id} data-testid={`opt-${option.id}`}>
+            {option.displayName ?? option.label ?? option.id}
+          </li>
+        ))}
+      </ul>
+      {filter.noResults && <div data-testid="no-results">No models found</div>}
+    </div>
+  );
+}
+
+function longCatalog(count: number, prefix = "model") {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `${prefix}-${i}`,
+    displayName: `${prefix} ${i}`,
+  }));
+}
+
+describe("useModelMenuFilter", () => {
+  it("keeps every option listed until a query is typed", () => {
+    render(<FilterHarness options={longCatalog(20)} />);
+    expect(screen.getAllByTestId(/^opt-model-/)).toHaveLength(20);
+    expect(screen.queryByTestId("no-results")).toBeNull();
+  });
+
+  it("requires every whitespace-separated term to match the label or id", () => {
+    render(
+      <FilterHarness
+        options={[
+          { id: "glm-5.3-flash", displayName: "GLM 5.3 Flash" },
+          { id: "glm-5.3", displayName: "GLM 5.3" },
+          { id: "kimi-k3", displayName: "Kimi K3" },
+          // Pad past the threshold so the search field renders.
+          ...longCatalog(15),
+        ]}
+      />,
+    );
+    // Both terms must appear — "glm flash" matches only the flash variant.
+    fireEvent.change(screen.getByTestId("composer-agent-models-search"), {
+      target: { value: "glm flash" },
+    });
+    expect(screen.getByTestId("opt-glm-5.3-flash")).toBeTruthy();
+    expect(screen.queryByTestId("opt-glm-5.3")).toBeNull();
+    expect(screen.queryByTestId("opt-kimi-k3")).toBeNull();
+  });
+
+  it("matches against the id when the label does not carry the term", () => {
+    render(
+      <FilterHarness
+        options={[
+          { id: "zai/glm-5.3", displayName: "GLM 5.3" },
+          { id: "moonshotai/kimi-k3", displayName: "Kimi K3" },
+          ...longCatalog(15),
+        ]}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("composer-agent-models-search"), {
+      target: { value: "moonshotai" },
+    });
+    expect(screen.queryByTestId("opt-zai/glm-5.3")).toBeNull();
+    expect(screen.getByTestId("opt-moonshotai/kimi-k3")).toBeTruthy();
+  });
+
+  it("falls back through displayName, label, then id for matching", () => {
+    render(
+      <FilterHarness
+        options={[{ id: "a", label: "Alpha" }, { id: "beta-only-id" }, ...longCatalog(15)]}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("composer-agent-models-search"), {
+      target: { value: "beta" },
+    });
+    expect(screen.getByTestId("opt-beta-only-id")).toBeTruthy();
+    expect(screen.queryByTestId("opt-a")).toBeNull();
+  });
+});
+
+describe("useModelMenuFilter / ModelMenuSearch", () => {
+  const baseOptions = [
+    { id: "alpha", label: "Alpha One" },
+    { id: "beta", label: "Beta Two" },
+    ...Array.from({ length: 20 }, (_, i) => ({ id: `filler-${i}`, label: `Filler ${i}` })),
+  ];
+
+  it("only shows search for catalogs longer than the threshold", () => {
+    const short = renderHook(() =>
+      useModelMenuFilter(baseOptions.slice(0, MODEL_MENU_SEARCH_THRESHOLD)),
+    );
+    expect(short.result.current.showSearch).toBe(false);
+
+    const long = renderHook(() => useModelMenuFilter(baseOptions));
+    expect(long.result.current.showSearch).toBe(true);
+  });
+
+  it("matches labels case-insensitively", () => {
+    const { result } = renderHook(() => useModelMenuFilter(baseOptions));
+    act(() => result.current.setQuery("ALPHA one"));
+    expect(result.current.filteredOptions).toHaveLength(1);
+    expect(result.current.filteredOptions[0].id).toBe("alpha");
+  });
+
+  it("matches ids case-insensitively", () => {
+    const { result } = renderHook(() => useModelMenuFilter(baseOptions));
+    act(() => result.current.setQuery("FILLER-3"));
+    expect(result.current.filteredOptions).toHaveLength(1);
+    expect(result.current.filteredOptions[0].id).toBe("filler-3");
+  });
+
+  it("reports no results when nothing matches", () => {
+    const { result } = renderHook(() => useModelMenuFilter(baseOptions));
+    act(() => result.current.setQuery("zzz"));
+    expect(result.current.noResults).toBe(true);
+    expect(result.current.filteredOptions).toHaveLength(0);
+  });
+
+  it("clears the query when the caller resets it", () => {
+    const { result } = renderHook(() => useModelMenuFilter(baseOptions));
+    act(() => result.current.setQuery("alpha"));
+    expect(result.current.filteredOptions).toHaveLength(1);
+    act(() => result.current.setQuery(""));
+    expect(result.current.filteredOptions).toHaveLength(baseOptions.length);
+  });
+
+  it("renders the shared search input with the required test id", () => {
+    function Wrapper() {
+      const filter = useModelMenuFilter(baseOptions);
+      return <ModelMenuSearch filter={filter} />;
+    }
+    render(<Wrapper />);
+    const input = screen.getByTestId("composer-agent-models-search");
+    expect(input).toHaveAttribute("placeholder", "Search models…");
+    expect(input).toHaveAttribute("aria-label", "Search models");
+  });
+
+  it("stops keydown propagation on the search input", () => {
+    function Wrapper() {
+      const filter = useModelMenuFilter(baseOptions);
+      return <ModelMenuSearch filter={filter} />;
+    }
+    const parentKeyDown = vi.fn();
+    render(
+      <div onKeyDown={parentKeyDown}>
+        <Wrapper />
+      </div>,
+    );
+    fireEvent.keyDown(screen.getByTestId("composer-agent-models-search"), {
+      key: "ArrowDown",
+      code: "ArrowDown",
+    });
+    expect(parentKeyDown).not.toHaveBeenCalled();
   });
 });

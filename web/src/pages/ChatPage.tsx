@@ -202,7 +202,6 @@ import {
   smartRoutingSourceFor,
 } from "@/lib/smartRoutingAvailability";
 import { useHostModelOptions, useHosts } from "@/hooks/useHosts";
-import { nativeModelLabel } from "@/components/HarnessConfigControls";
 import { PickerSectionHeader } from "@/components/composer/HarnessMenuRow";
 import { ComposerConfigSections } from "@/components/composer/ComposerConfigSections";
 import { ComposerWorkspaceStatus } from "@/components/composer/ComposerWorkspaceStatus";
@@ -215,6 +214,11 @@ import {
   formatStatusEffortLabel,
   formatModelEffortStatusLabel,
 } from "@/lib/composerModelLabel";
+import {
+  ModelMenuSearch,
+  nativeModelLabel,
+  useModelMenuFilter,
+} from "@/components/HarnessConfigControls";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
 import { MainTerminalView } from "@/shell/MainTerminalView";
@@ -4412,6 +4416,7 @@ function SessionHarnessPicker({
       )
         await store.setCostControlMode("off");
     });
+  const modelFilter = useModelMenuFilter(modelOptions);
   const configContent = (
     <ComposerConfigSections
       models={
@@ -4419,6 +4424,14 @@ function SessionHarnessPicker({
           ? {
               testId: "composer-agent-models",
               header: "Models",
+              leading: (
+                <>
+                  {modelFilter.showSearch && <ModelMenuSearch filter={modelFilter} />}
+                  {modelFilter.noResults && (
+                    <div className="px-2 py-1 text-xs text-muted-foreground">No models found</div>
+                  )}
+                </>
+              ),
               choices: [
                 ...(!modelOptions.some((model) => model.isDefault)
                   ? [
@@ -4432,7 +4445,7 @@ function SessionHarnessPicker({
                       },
                     ]
                   : []),
-                ...modelOptions.map((model) => ({
+                ...modelFilter.filteredOptions.map((model) => ({
                   key: model.id,
                   label: nativeModelLabel(model),
                   checked:
@@ -4508,6 +4521,12 @@ function SessionHarnessPicker({
         tooltipTestId="composer-config-gear-tooltip"
         testId="composer-agent-menu"
         configOpen={configMenuOpen}
+        onContentOpenAutoFocus={(event) => {
+          if (modelFilter.showSearch && modelFilter.inputRef.current) {
+            event.preventDefault();
+            modelFilter.focusInput();
+          }
+        }}
       >
         {isMobile && configMenuOpen ? (
           <HarnessPickerConfigPage
