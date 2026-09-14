@@ -3479,7 +3479,9 @@ export function NewChatLandingScreen() {
                         </div>
                       )}
                       {modelFilter.noResults && (
-                        <div className="px-2 py-1 text-xs text-muted-foreground">No models found</div>
+                        <div className="px-2 py-1 text-xs text-muted-foreground">
+                          No models found
+                        </div>
                       )}
                     </>
                   ),
@@ -3497,18 +3499,18 @@ export function NewChatLandingScreen() {
                         ]
                       : []),
                     ...modelFilter.filteredOptions.map((option) => ({
-                        key: option.id,
-                        label: visibleModelLabel(nativeModelLabel(option)),
-                        checked:
-                          !routingOn &&
-                          (pickedModel === option.id ||
-                            (pickedModel === "" && option.isDefault === true)),
-                        onSelect: () =>
-                          selectPickerModel(option.isDefault ? MODEL_SELECT_DEFAULT : option.id),
-                        testId: `new-chat-landing-agent-model-${option.id}`,
-                        title: nativeModelLabel(option),
-                        className: "whitespace-normal break-words [&>span:last-child]:min-w-0",
-                      })),
+                      key: option.id,
+                      label: visibleModelLabel(nativeModelLabel(option)),
+                      checked:
+                        !routingOn &&
+                        (pickedModel === option.id ||
+                          (pickedModel === "" && option.isDefault === true)),
+                      onSelect: () =>
+                        selectPickerModel(option.isDefault ? MODEL_SELECT_DEFAULT : option.id),
+                      testId: `new-chat-landing-agent-model-${option.id}`,
+                      title: nativeModelLabel(option),
+                      className: "whitespace-normal break-words [&>span:last-child]:min-w-0",
+                    })),
                   ],
                 }
               : undefined
