@@ -80,9 +80,7 @@ import {
   MODEL_SELECT_SMART,
   ModelMenuSearch,
   defaultModelLabel,
-  deriveModelProviders,
   nativeModelLabel,
-  partitionModelOptionsByProvider,
   useModelMenuFilter,
 } from "@/components/HarnessConfigControls";
 import { ProjectLandingIcon } from "@/components/ProjectIconPicker";
@@ -90,7 +88,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuCheckboxItem,
-  DropdownMenuLabel,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuSub,
